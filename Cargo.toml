@@ -1,0 +1,15 @@
+[package]
+name = "cnc-formats"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Clean-room binary format parsers for Command & Conquer game files"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/iron-curtain-engine/cnc-formats"
+keywords = ["cnc", "red-alert", "command-conquer", "parser", "gamedev"]
+categories = ["parser-implementations", "game-development"]
+authors = ["Iron Curtain contributors"]
+
+[dependencies]
+
+[dev-dependencies]
