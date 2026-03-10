@@ -1,11 +1,9 @@
 [advisories]
 db-path = "~/.cargo/advisory-db"
-vulnerability = "deny"
 unmaintained = "all"
 yanked = "warn"
 
 [licenses]
-unlicensed = "deny"
 # This is a permissively licensed crate — GPL is NOT allowed.
 # If a dependency introduces GPL, this crate cannot use it.
 allow = [
@@ -18,7 +16,6 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
 ]
-copyleft = "deny"
 confidence-threshold = 0.8
 
 [bans]
