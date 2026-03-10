@@ -1,22 +1,14 @@
+# cargo-deny configuration for cnc-formats
+# This crate is MIT OR Apache-2.0 — every dependency must be compatible.
+
 [advisories]
-db-path = "~/.cargo/advisory-db"
-unmaintained = "workspace"
-yanked = "warn"
+yanked = "deny"
 
 [licenses]
-# This is a permissively licensed crate — GPL is NOT allowed.
-# If a dependency introduces GPL, this crate cannot use it.
 allow = [
     "MIT",
     "Apache-2.0",
 ]
-confidence-threshold = 0.8
-
-[bans]
-multiple-versions = "warn"
-wildcards = "allow"
 
 [sources]
-unknown-registry = "warn"
-unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
