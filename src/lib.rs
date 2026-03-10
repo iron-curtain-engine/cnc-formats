@@ -6,17 +6,18 @@
 //! This crate provides parsers for binary file formats used by
 //! Command & Conquer games (Red Alert, Tiberian Dawn, and related titles):
 //!
-//! - **`.mix`** — Archive containers holding game assets
-//! - **`.shp`** — Sprite image frames
-//! - **`.pal`** — 256-color palettes
-//! - **`.aud`** — Audio samples (IMA ADPCM / Westwood ADPCM)
-//! - **`.vqa`** — Full-motion video
-//! - **MiniYAML** — Configuration format used by OpenRA
+//! | Module          | Format | Description                              |
+//! |-----------------|--------|------------------------------------------|
+//! | [`mix`]         | `.mix` | Flat archive with CRC-based file lookup  |
+//! | [`pal`]         | `.pal` | 256-color 6-bit VGA palette              |
+//! | [`shp`]         | `.shp` | Keyframe sprite animation frames         |
+//! | [`aud`]         | `.aud` | Westwood IMA ADPCM audio                 |
+//! | [`lcw`]         | —      | LCW decompression used by SHP/VQA/TMP    |
 //!
 //! ## Clean-Room Design
 //!
 //! All parsing is implemented from publicly available format documentation
-//! and binary analysis. This crate contains **no EA-derived code**, which
+//! and binary analysis.  This crate contains **no EA-derived code**, which
 //! is why it can be licensed under MIT/Apache-2.0.
 //!
 //! EA GPL-derived parsing logic lives in the `ra-formats` crate (GPL v3)
@@ -36,12 +37,11 @@
 
 #![warn(missing_docs)]
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn placeholder() {
-        // Format parsing tests will be added in M1/G1 against the RA1 test corpus.
-        // Each format module (.mix, .shp, .pal, .aud, .vqa) will have its own
-        // test suite validating against known-good binary files.
-    }
-}
+pub mod aud;
+pub mod error;
+pub mod lcw;
+pub mod mix;
+pub mod pal;
+pub mod shp;
+
+pub use error::Error;
