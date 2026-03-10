@@ -1,9 +1,8 @@
 [advisories]
 db-path = "~/.cargo/advisory-db"
 vulnerability = "deny"
-unmaintained = "warn"
+unmaintained = "all"
 yanked = "warn"
-notice = "warn"
 
 [licenses]
 unlicensed = "deny"
