@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Copyright (c) 2025–present Iron Curtain contributors
+
+name: Fuzz
+
+on:
+    schedule:
+        # Run weekly — Sunday 03:00 UTC
+        - cron: "0 3 * * 0"
+    workflow_dispatch:
+        inputs:
+            duration:
+                description: "Fuzz duration per target (seconds)"
+                default: "60"
+                required: false
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    fuzz:
+        name: cargo-fuzz
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                target:
+                    [
+                        fuzz_aud,
+                        fuzz_fnt,
+                        fuzz_lcw,
+                        fuzz_mix,
+                        fuzz_pal,
+                        fuzz_shp,
+                        fuzz_tmp,
+                        fuzz_vqa,
+                        fuzz_wsa,
+                    ]
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: dtolnay/rust-toolchain@nightly
+
+            - name: Install cargo-fuzz
+              run: cargo install cargo-fuzz --locked
+
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: fuzz -> fuzz/target
+
+            - name: Run fuzzer — ${{ matrix.target }}
+              run: |
+                  DURATION="${{ github.event.inputs.duration || '60' }}"
+                  cargo fuzz run ${{ matrix.target }} -- -max_total_time="${DURATION}"
+
+            - name: Upload crash artifacts
+              if: failure()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: fuzz-crash-${{ matrix.target }}
+                  path: fuzz/artifacts/${{ matrix.target }}

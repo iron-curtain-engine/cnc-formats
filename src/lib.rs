@@ -13,6 +13,10 @@
 //! | [`shp`]         | `.shp` | Keyframe sprite animation frames         |
 //! | [`aud`]         | `.aud` | Westwood IMA ADPCM audio                 |
 //! | [`lcw`]         | —      | LCW decompression used by SHP/VQA/TMP    |
+//! | [`tmp`]         | `.tmp` | Terrain tile sets (TD + RA variants)     |
+//! | [`vqa`]         | `.vqa` | VQ video container (IFF chunk-based)     |
+//! | [`wsa`]         | `.wsa` | LCW + XOR-delta animation                |
+//! | [`fnt`]         | `.fnt` | Bitmap fonts (256-glyph fixed-height)    |
 //!
 //! ## Clean-Room Design
 //!
@@ -25,8 +29,8 @@
 //!
 //! ## `no_std` Support
 //!
-//! This crate aims to support `#![no_std]` environments where possible.
-//! Allocator-dependent features are gated behind the `alloc` feature.
+//! This crate is `#![no_std]` and requires `alloc` (all parsers return
+//! heap-allocated structures).
 //!
 //! ## Design Authority
 //!
@@ -36,12 +40,28 @@
 //! Related decisions: D076 (standalone crate extraction), D003 (YAML format).
 
 #![warn(missing_docs)]
+#![no_std]
+
+extern crate alloc;
+
+// ── Public modules ───────────────────────────────────────────────────────────
+// Each module is a self-contained parser for one file format.  Modules depend
+// only on `error` and `lcw`; there are no circular dependencies.
 
 pub mod aud;
 pub mod error;
+pub mod fnt;
 pub mod lcw;
 pub mod mix;
+#[cfg(feature = "encrypted-mix")]
+pub mod mix_crypt;
 pub mod pal;
+pub(crate) mod read;
 pub mod shp;
+pub mod tmp;
+pub mod vqa;
+pub mod wsa;
 
+// Re-export `Error` at the crate root so callers can write `cnc_formats::Error`
+// without descending into the `error` module.
 pub use error::Error;

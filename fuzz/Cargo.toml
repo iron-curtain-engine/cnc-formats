@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Copyright (c) 2025-present Iron Curtain contributors
+
+[package]
+name = "cnc-formats-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.cnc-formats]
+path = ".."
+
+# One target per format module, as required by V38.
+
+[[bin]]
+name = "fuzz_pal"
+path = "fuzz_targets/fuzz_pal.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_lcw"
+path = "fuzz_targets/fuzz_lcw.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_shp"
+path = "fuzz_targets/fuzz_shp.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_mix"
+path = "fuzz_targets/fuzz_mix.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_aud"
+path = "fuzz_targets/fuzz_aud.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_tmp"
+path = "fuzz_targets/fuzz_tmp.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_vqa"
+path = "fuzz_targets/fuzz_vqa.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_wsa"
+path = "fuzz_targets/fuzz_wsa.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_fnt"
+path = "fuzz_targets/fuzz_fnt.rs"
+doc = false
+
+[workspace]
+members = ["."]

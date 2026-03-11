@@ -32,19 +32,31 @@
 //!
 //! ## References
 //!
-//! Format source: `REDALERT/WIN32LIB/SHAPE.H`, `REDALERT/2KEYFRAM.CPP`.
+//! Implemented from community documentation (XCC Utilities, C&C Modding
+//! Wiki) and binary analysis of game files.  Cross-reference: the original
+//! game defines the header in `SHAPE.H` / `2KEYFRAM.CPP`.
 
 use crate::error::Error;
 use crate::lcw;
+use crate::read::{read_u16_le, read_u32_le};
+use alloc::vec::Vec;
+
+// V38 safety note: the frame_count field is u16 (max 65535), which inherently
+// satisfies a reasonable bound.  No runtime cap constant is needed because
+// the offset-table allocation (frame_count × 4 bytes, max ~256 KB) is small
+// enough that a malicious header cannot cause a problematic allocation.
 
 /// Bitmask in the raw offset table entry signalling uncompressed frame data.
+///
+/// When set, the frame's bytes are raw palette-indexed pixels; when clear,
+/// the bytes are LCW-compressed and must be decompressed before use.
 const OFFSET_UNCOMPRESSED_FLAG: u32 = 0x8000_0000;
 
 // ─── Header ──────────────────────────────────────────────────────────────────
 
 /// The 14-byte keyframe animation header at the start of every SHP file.
 ///
-/// Corresponds to `KeyFrameHeaderType` in `REDALERT/2KEYFRAM.CPP`.
+/// Layout matches the original game's `KeyFrameHeaderType` (14 bytes, LE fields).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShpHeader {
     /// Number of animation frames.
@@ -66,6 +78,7 @@ pub struct ShpHeader {
 
 impl ShpHeader {
     /// Returns `true` if this SHP file contains an embedded palette.
+    #[inline]
     pub fn has_embedded_palette(&self) -> bool {
         self.flags & 0x0001 != 0
     }
@@ -74,34 +87,39 @@ impl ShpHeader {
 // ─── Frame ───────────────────────────────────────────────────────────────────
 
 /// A single frame extracted from an SHP file.
+///
+/// Borrows frame data from the input slice (zero-copy parse).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShpFrame {
+pub struct ShpFrame<'a> {
     /// Raw bytes for this frame as stored on disk.
     ///
     /// When `is_compressed` is `true`, call [`lcw::decompress`] to obtain
     /// the palette-indexed pixel data (width × height bytes).
-    pub data: Vec<u8>,
+    ///
+    /// This is a borrow into the original input slice — no heap copy is made
+    /// during parsing.
+    pub data: &'a [u8],
     /// `false` = LCW-compressed; `true` = raw pixel data.
     pub is_uncompressed: bool,
 }
 
-impl ShpFrame {
+impl ShpFrame<'_> {
     /// Returns the pixel data for this frame.
     ///
-    /// - If `is_uncompressed` is `true`, the raw `data` bytes are the pixels.
-    /// - If `is_uncompressed` is `false`, decompresses using LCW and returns
-    ///   the result.
+    /// - If `is_uncompressed` is `true`, returns a copy of `data` (raw pixels).
+    /// - If `is_uncompressed` is `false`, decompresses the data using LCW.
     ///
     /// The `expected_size` should be `header.width as usize * header.height as usize`.
+    /// It is passed to [`lcw::decompress`] as the output-size cap (V38).
     ///
     /// # Errors
     ///
     /// Forwards [`crate::lcw::decompress`] errors for compressed frames.
     pub fn pixels(&self, expected_size: usize) -> Result<Vec<u8>, Error> {
         if self.is_uncompressed {
-            Ok(self.data.clone())
+            Ok(self.data.to_vec())
         } else {
-            lcw::decompress(&self.data, expected_size)
+            lcw::decompress(self.data, expected_size)
         }
     }
 }
@@ -109,38 +127,46 @@ impl ShpFrame {
 // ─── ShpFile ─────────────────────────────────────────────────────────────────
 
 /// A parsed SHP sprite file.
+///
+/// Borrows all variable-size data (frame bytes, embedded palette) from the
+/// input slice.  Parsing allocates only the `Vec` of frame descriptors and
+/// the offset table — the pixel data itself is zero-copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShpFile {
+pub struct ShpFile<'a> {
     /// File header with frame dimensions and flags.
     pub header: ShpHeader,
     /// Optional embedded palette (768 bytes of 6-bit VGA RGB data).
-    pub embedded_palette: Option<Vec<u8>>,
+    /// Borrows directly from the input slice.
+    pub embedded_palette: Option<&'a [u8]>,
     /// All animation frames, in order.
-    pub frames: Vec<ShpFrame>,
+    pub frames: Vec<ShpFrame<'a>>,
 }
 
-impl ShpFile {
+impl<'a> ShpFile<'a> {
     /// Parses an SHP file from a byte slice.
     ///
     /// # Errors
     ///
     /// - [`Error::UnexpectedEof`]  — data is too short for the header or offset table.
     /// - [`Error::InvalidOffset`]  — a frame offset points outside the file data.
-    pub fn parse(data: &[u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
         // ── Header (14 bytes = 7 × u16) ───────────────────────────────────
+        // Fields are read as raw little-endian u16.  No field is rejected
+        // at this stage — validation happens when offsets are resolved.
         if data.len() < 14 {
-            return Err(Error::UnexpectedEof);
+            return Err(Error::UnexpectedEof {
+                needed: 14,
+                available: data.len(),
+            });
         }
-        let read_u16 =
-            |offset: usize| -> u16 { u16::from_le_bytes([data[offset], data[offset + 1]]) };
-
-        let frame_count = read_u16(0) as usize;
-        let x = read_u16(2);
-        let y = read_u16(4);
-        let width = read_u16(6);
-        let height = read_u16(8);
-        let largest_frame_size = read_u16(10);
-        let flags = read_u16(12);
+        // Safe reads via helpers (defense-in-depth over the upfront check).
+        let frame_count = read_u16_le(data, 0)? as usize;
+        let x = read_u16_le(data, 2)?;
+        let y = read_u16_le(data, 4)?;
+        let width = read_u16_le(data, 6)?;
+        let height = read_u16_le(data, 8)?;
+        let largest_frame_size = read_u16_le(data, 10)?;
+        let flags = read_u16_le(data, 12)?;
 
         let header = ShpHeader {
             frame_count: frame_count as u16,
@@ -152,21 +178,29 @@ impl ShpFile {
             flags,
         };
 
-        // ── Offset table: (frame_count + 1) × u32 ─────────────────────────
+        // ── Offset table: (frame_count + 1) × u32 ─────────────────────
+        // The extra entry is a sentinel pointing past the last frame.
+        // Each raw offset carries OFFSET_UNCOMPRESSED_FLAG in its high bit.
         let offset_table_bytes = (frame_count + 1) * 4;
         let offset_table_start = 14usize;
         if offset_table_start + offset_table_bytes > data.len() {
-            return Err(Error::UnexpectedEof);
+            return Err(Error::UnexpectedEof {
+                needed: offset_table_start + offset_table_bytes,
+                available: data.len(),
+            });
         }
 
         let mut raw_offsets = Vec::with_capacity(frame_count + 1);
         for i in 0..=frame_count {
             let pos = offset_table_start + i * 4;
-            let raw = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            let raw = read_u32_le(data, pos)?;
             raw_offsets.push(raw);
         }
 
-        // ── Optional embedded palette ──────────────────────────────────────
+        // ── Optional embedded palette ──────────────────────────────────
+        // When flags bit 0 is set, a 768-byte palette (256 × 3 RGB, 6-bit VGA)
+        // appears between the offset table and the frame data.  This palette
+        // can be fed to `pal::Palette::parse()` for colour lookup.
         let has_palette = flags & 0x0001 != 0;
         let palette_start = offset_table_start + offset_table_bytes;
         let palette_end = if has_palette {
@@ -175,16 +209,27 @@ impl ShpFile {
             palette_start
         };
         if palette_end > data.len() {
-            return Err(Error::UnexpectedEof);
+            return Err(Error::UnexpectedEof {
+                needed: palette_end,
+                available: data.len(),
+            });
         }
         let embedded_palette = if has_palette {
-            Some(data[palette_start..palette_end].to_vec())
+            Some(
+                data.get(palette_start..palette_end)
+                    .ok_or(Error::UnexpectedEof {
+                        needed: palette_end,
+                        available: data.len(),
+                    })?,
+            )
         } else {
             None
         };
 
         // ── Frame data ─────────────────────────────────────────────────────
-        // Offsets in the table are relative to the start of the whole file.
+        // Offsets are absolute (relative to the start of the whole file).
+        // The high bit flags compression: set = uncompressed, clear = LCW.
+        // We mask the flag off before slicing.
         let mut frames = Vec::with_capacity(frame_count);
         for i in 0..frame_count {
             let raw_start = raw_offsets[i];
@@ -193,10 +238,18 @@ impl ShpFile {
             let start = (raw_start & !OFFSET_UNCOMPRESSED_FLAG) as usize;
             let end = (raw_end & !OFFSET_UNCOMPRESSED_FLAG) as usize;
 
+            // Validate structural integrity: start must not exceed end,
+            // and end must not exceed the file length.
             if start > end || end > data.len() {
-                return Err(Error::InvalidOffset);
+                return Err(Error::InvalidOffset {
+                    offset: end,
+                    bound: data.len(),
+                });
             }
-            let frame_data = data[start..end].to_vec();
+            let frame_data = data.get(start..end).ok_or(Error::InvalidOffset {
+                offset: end,
+                bound: data.len(),
+            })?;
             frames.push(ShpFrame {
                 data: frame_data,
                 is_uncompressed,
@@ -211,11 +264,13 @@ impl ShpFile {
     }
 
     /// Returns the number of animation frames.
+    #[inline]
     pub fn frame_count(&self) -> usize {
         self.frames.len()
     }
 
     /// Returns the pixel area of a single frame (width × height).
+    #[inline]
     pub fn frame_pixel_count(&self) -> usize {
         self.header.width as usize * self.header.height as usize
     }
@@ -278,137 +333,5 @@ pub(crate) fn build_shp(
     out
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Too-short data returns UnexpectedEof.
-    #[test]
-    fn test_parse_too_short() {
-        assert_eq!(ShpFile::parse(&[]).unwrap_err(), Error::UnexpectedEof);
-        assert_eq!(
-            ShpFile::parse(&[0u8; 13]).unwrap_err(),
-            Error::UnexpectedEof
-        );
-    }
-
-    /// Parse a zero-frame SHP (header only + 1 sentinel offset).
-    #[test]
-    fn test_parse_zero_frames() {
-        let bytes = build_shp(8, 8, 0, &[], None);
-        let shp = ShpFile::parse(&bytes).unwrap();
-        assert_eq!(shp.frame_count(), 0);
-        assert_eq!(shp.header.width, 8);
-        assert_eq!(shp.header.height, 8);
-        assert!(shp.embedded_palette.is_none());
-    }
-
-    /// Parse a single-frame uncompressed SHP.
-    #[test]
-    fn test_parse_single_frame() {
-        let pixels: Vec<u8> = (0u8..64).collect(); // 8×8
-        let bytes = build_shp(8, 8, 0, &[&pixels], None);
-        let shp = ShpFile::parse(&bytes).unwrap();
-
-        assert_eq!(shp.frame_count(), 1);
-        assert_eq!(shp.header.frame_count, 1);
-        assert_eq!(shp.header.width, 8);
-        assert_eq!(shp.header.height, 8);
-        assert!(!shp.header.has_embedded_palette());
-        assert!(shp.frames[0].is_uncompressed);
-        assert_eq!(shp.frames[0].data, pixels);
-    }
-
-    /// pixels() on an uncompressed frame returns the raw bytes unchanged.
-    #[test]
-    fn test_frame_pixels_uncompressed() {
-        let pixels: Vec<u8> = (0u8..16).collect(); // 4×4
-        let bytes = build_shp(4, 4, 0, &[&pixels], None);
-        let shp = ShpFile::parse(&bytes).unwrap();
-
-        let out = shp.frames[0].pixels(16).unwrap();
-        assert_eq!(out, pixels);
-    }
-
-    /// Parse a multi-frame SHP; each frame's content is correct.
-    #[test]
-    fn test_parse_multiple_frames() {
-        let f0: Vec<u8> = vec![0xAAu8; 16];
-        let f1: Vec<u8> = vec![0xBBu8; 16];
-        let f2: Vec<u8> = vec![0xCCu8; 16];
-        let bytes = build_shp(4, 4, 0, &[&f0, &f1, &f2], None);
-        let shp = ShpFile::parse(&bytes).unwrap();
-
-        assert_eq!(shp.frame_count(), 3);
-        assert_eq!(shp.frames[0].data, f0);
-        assert_eq!(shp.frames[1].data, f1);
-        assert_eq!(shp.frames[2].data, f2);
-    }
-
-    /// SHP with embedded palette: palette bytes are captured.
-    #[test]
-    fn test_parse_embedded_palette() {
-        let mut pal = vec![0u8; 768];
-        pal[0] = 63; // red channel of color 0 = 63
-        let pixels: Vec<u8> = vec![0u8; 4];
-        let bytes = build_shp(2, 2, 0x0001, &[&pixels], Some(&pal));
-        let shp = ShpFile::parse(&bytes).unwrap();
-
-        assert!(shp.header.has_embedded_palette());
-        let ep = shp.embedded_palette.as_ref().unwrap();
-        assert_eq!(ep.len(), 768);
-        assert_eq!(ep[0], 63);
-    }
-
-    /// frame_pixel_count returns width × height.
-    #[test]
-    fn test_frame_pixel_count() {
-        let bytes = build_shp(16, 24, 0, &[&vec![0u8; 384]], None);
-        let shp = ShpFile::parse(&bytes).unwrap();
-        assert_eq!(shp.frame_pixel_count(), 384);
-    }
-
-    /// LCW-compressed frame: pixels() decompresses correctly.
-    #[test]
-    fn test_compressed_frame_pixels() {
-        // Build a small LCW stream that decompresses to 4 bytes of 0xAB.
-        // 0xFE = long fill, count=4, value=0xAB, 0x80 = end
-        let lcw_data: Vec<u8> = vec![0xFEu8, 0x04, 0x00, 0xAB, 0x80];
-
-        // Build SHP manually without the uncompressed flag.
-        // We'll construct the byte stream directly.
-        let frame_count: u16 = 1;
-        let width: u16 = 2;
-        let height: u16 = 2;
-        let flags: u16 = 0;
-        let offset_table_size = (frame_count as usize + 1) * 4;
-        let data_start = 14 + offset_table_size;
-
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&frame_count.to_le_bytes());
-        bytes.extend_from_slice(&0u16.to_le_bytes()); // x
-        bytes.extend_from_slice(&0u16.to_le_bytes()); // y
-        bytes.extend_from_slice(&width.to_le_bytes());
-        bytes.extend_from_slice(&height.to_le_bytes());
-        bytes.extend_from_slice(&(lcw_data.len() as u16).to_le_bytes()); // largest
-        bytes.extend_from_slice(&flags.to_le_bytes());
-
-        // Offset table: offset[0] = data_start (no flag), offset[1] = sentinel
-        let off0 = data_start as u32; // compressed: no OFFSET_UNCOMPRESSED_FLAG
-        let off1 = (data_start + lcw_data.len()) as u32;
-        bytes.extend_from_slice(&off0.to_le_bytes());
-        bytes.extend_from_slice(&off1.to_le_bytes());
-
-        // Frame data
-        bytes.extend_from_slice(&lcw_data);
-
-        let shp = ShpFile::parse(&bytes).unwrap();
-        assert_eq!(shp.frame_count(), 1);
-        assert!(!shp.frames[0].is_uncompressed);
-
-        let pixels = shp.frames[0].pixels(4).unwrap();
-        assert_eq!(pixels, vec![0xABu8; 4]);
-    }
-}
+mod tests;

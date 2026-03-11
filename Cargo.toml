@@ -10,6 +10,20 @@ keywords = ["cnc", "red-alert", "command-conquer", "parser", "gamedev"]
 categories = ["parser-implementations", "game-development"]
 authors = ["Iron Curtain contributors"]
 
+[features]
+default = ["encrypted-mix"]
+encrypted-mix = ["dep:blowfish"]
+
 [dependencies]
+blowfish = { version = "0.9", optional = true }
 
 [dev-dependencies]
+
+# ── Release profile ──────────────────────────────────────────────────────
+# LTO enables cross-crate inlining and dead-code elimination, which is
+# particularly important for this crate since it's used as a library by
+# the Iron Curtain engine.  `codegen-units = 1` maximises whole-program
+# optimisation at the cost of compile time (acceptable for release builds).
+[profile.release]
+lto = true
+codegen-units = 1
