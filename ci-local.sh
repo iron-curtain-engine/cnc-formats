@@ -174,7 +174,7 @@ run_check "Format check" "cargo fmt --check"
 # -- 2. Clippy (all features) ----------------------------------------------
 run_check "Clippy (all features)" "cargo clippy --tests --all-features -- -D warnings"
 
-# -- 3. Clippy (no default features -- no_std without blowfish) -------------
+# -- 3. Clippy (no default features -- without blowfish) --------------------
 run_check "Clippy (no default features)" "cargo clippy --tests --no-default-features -- -D warnings"
 
 # -- 4. Tests (all features) -----------------------------------------------

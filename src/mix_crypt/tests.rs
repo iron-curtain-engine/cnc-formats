@@ -2,7 +2,6 @@
 // Copyright (c) 2025-present Iron Curtain contributors
 
 use super::*;
-use alloc::string::ToString;
 
 // ── Base-64 decoding ─────────────────────────────────────────────────
 
@@ -230,7 +229,6 @@ fn decrypt_header_short_input_returns_eof() {
 /// BlowfishLE, then decrypted and compared to the original.
 #[test]
 fn decrypt_header_roundtrip() {
-    use alloc::vec::Vec;
     use blowfish::cipher::generic_array::GenericArray;
     use blowfish::cipher::{BlockEncrypt, KeyInit};
     use blowfish::BlowfishLE;
@@ -373,7 +371,7 @@ fn bn_mul_basic() {
     let a = bn_from_u32(100);
     let b = bn_from_u32(200);
     let len = bn_len(&a).max(bn_len(&b));
-    let mut dest = alloc::vec![0u32; len * 2 + 1];
+    let mut dest = vec![0u32; len * 2 + 1];
     bn_mul(&mut dest, &a, &b, len);
     assert_eq!(dest[0], 20_000);
     assert_eq!(dest[1], 0);

@@ -56,7 +56,6 @@
 
 use crate::error::Error;
 use crate::read::{read_u16_le, read_u32_le};
-use alloc::vec::Vec;
 
 /// V38 safety cap: maximum number of entries in a MIX archive.
 ///

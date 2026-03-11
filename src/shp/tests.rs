@@ -2,8 +2,6 @@
 // Copyright (c) 2025-present Iron Curtain contributors
 
 use super::*;
-use alloc::string::ToString;
-use alloc::vec;
 
 /// Input shorter than the 14-byte header returns `UnexpectedEof`.
 ///

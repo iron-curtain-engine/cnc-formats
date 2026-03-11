@@ -15,6 +15,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.cnc-formats]
 path = ".."
+features = ["miniyaml"]
 
 # One target per format module, as required by V38.
 
@@ -61,6 +62,16 @@ doc = false
 [[bin]]
 name = "fuzz_fnt"
 path = "fuzz_targets/fuzz_fnt.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ini"
+path = "fuzz_targets/fuzz_ini.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_miniyaml"
+path = "fuzz_targets/fuzz_miniyaml.rs"
 doc = false
 
 [workspace]

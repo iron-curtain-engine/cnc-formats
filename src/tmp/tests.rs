@@ -2,7 +2,6 @@
 // Copyright (c) 2025–present Iron Curtain contributors
 
 use super::*;
-use alloc::vec;
 
 // ─── TD test helpers ─────────────────────────────────────────────────────────
 
@@ -427,7 +426,7 @@ fn ra_over_max_grid_count_rejected() {
 fn ra_error_display_includes_values() {
     let data = [0u8; 10];
     let err = RaTmpFile::parse(&data).unwrap_err();
-    let msg = alloc::format!("{err}");
+    let msg = format!("{err}");
     assert!(msg.contains("16"));
     assert!(msg.contains("10"));
 }
@@ -437,7 +436,7 @@ fn ra_error_display_includes_values() {
 fn td_error_display_includes_values() {
     let data = [0u8; 5];
     let err = TdTmpFile::parse(&data).unwrap_err();
-    let msg = alloc::format!("{err}");
+    let msg = format!("{err}");
     assert!(msg.contains("20"));
     assert!(msg.contains("5"));
 }

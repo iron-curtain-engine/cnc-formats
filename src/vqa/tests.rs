@@ -2,8 +2,6 @@
 // Copyright (c) 2025–present Iron Curtain contributors
 
 use super::*;
-use alloc::vec;
-use alloc::vec::Vec;
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -310,7 +308,7 @@ fn chunk_size_over_cap() {
 fn error_display_includes_values() {
     let data = [0u8; 8];
     let err = VqaFile::parse(&data).unwrap_err();
-    let msg = alloc::format!("{err}");
+    let msg = format!("{err}");
     assert!(msg.contains("12"));
     assert!(msg.contains("8"));
 }

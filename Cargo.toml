@@ -13,6 +13,12 @@ authors = ["Iron Curtain contributors"]
 [features]
 default = ["encrypted-mix"]
 encrypted-mix = ["dep:blowfish"]
+miniyaml = []
+
+[[bin]]
+name = "miniyaml2yaml"
+path = "src/bin/miniyaml2yaml.rs"
+required-features = ["miniyaml"]
 
 [dependencies]
 blowfish = { version = "0.9", optional = true }

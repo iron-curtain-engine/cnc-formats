@@ -32,7 +32,6 @@
 
 use crate::error::Error;
 use crate::read::{read_u16_le, read_u8};
-use alloc::vec::Vec;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 

@@ -2,9 +2,6 @@
 // Copyright (c) 2025-present Iron Curtain contributors
 
 use super::*;
-use alloc::string::ToString;
-use alloc::vec;
-use alloc::vec::Vec;
 
 fn all_zero_pal() -> Vec<u8> {
     vec![0u8; PALETTE_BYTES]

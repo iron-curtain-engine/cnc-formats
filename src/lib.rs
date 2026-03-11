@@ -17,6 +17,13 @@
 //! | [`vqa`]         | `.vqa` | VQ video container (IFF chunk-based)     |
 //! | [`wsa`]         | `.wsa` | LCW + XOR-delta animation                |
 //! | [`fnt`]         | `.fnt` | Bitmap fonts (256-glyph fixed-height)    |
+//! | [`ini`]         | `.ini` | Classic C&C rules file parser             |
+//!
+//! Feature-gated (requires `miniyaml` feature):
+//!
+//! | Module          | Format   | Description                              |
+//! |-----------------|----------|------------------------------------------|
+//! | [`miniyaml`]    | MiniYAML | OpenRA configuration file parser          |
 //!
 //! ## Clean-Room Design
 //!
@@ -27,11 +34,6 @@
 //! EA GPL-derived parsing logic lives in the `ra-formats` crate (GPL v3)
 //! in the Iron Curtain engine repository.
 //!
-//! ## `no_std` Support
-//!
-//! This crate is `#![no_std]` and requires `alloc` (all parsers return
-//! heap-allocated structures).
-//!
 //! ## Design Authority
 //!
 //! Format specifications and architectural decisions are documented in the
@@ -40,9 +42,6 @@
 //! Related decisions: D076 (standalone crate extraction), D003 (YAML format).
 
 #![warn(missing_docs)]
-#![no_std]
-
-extern crate alloc;
 
 // ── Public modules ───────────────────────────────────────────────────────────
 // Each module is a self-contained parser for one file format.  Modules depend
@@ -51,6 +50,7 @@ extern crate alloc;
 pub mod aud;
 pub mod error;
 pub mod fnt;
+pub mod ini;
 pub mod lcw;
 pub mod mix;
 #[cfg(feature = "encrypted-mix")]
@@ -61,6 +61,9 @@ pub mod shp;
 pub mod tmp;
 pub mod vqa;
 pub mod wsa;
+
+#[cfg(feature = "miniyaml")]
+pub mod miniyaml;
 
 // Re-export `Error` at the crate root so callers can write `cnc_formats::Error`
 // without descending into the `error` module.

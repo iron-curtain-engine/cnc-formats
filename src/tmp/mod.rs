@@ -58,7 +58,6 @@
 
 use crate::error::Error;
 use crate::read::{read_u16_le, read_u32_le};
-use alloc::vec::Vec;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 

@@ -39,7 +39,6 @@
 use crate::error::Error;
 use crate::lcw;
 use crate::read::{read_u16_le, read_u32_le};
-use alloc::vec::Vec;
 
 // V38 safety note: the frame_count field is u16 (max 65535), which inherently
 // satisfies a reasonable bound.  No runtime cap constant is needed because

@@ -23,7 +23,6 @@
 //! Medium and long copies use *absolute* offsets from the start of the output.
 
 use crate::error::Error;
-use alloc::vec::Vec;
 
 /// Maximum decompression expansion ratio (256:1) used as a safety cap.
 ///

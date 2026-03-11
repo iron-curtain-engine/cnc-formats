@@ -2,8 +2,6 @@
 // Copyright (c) 2025–present Iron Curtain contributors
 
 use super::*;
-use alloc::vec;
-use alloc::vec::Vec;
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -198,7 +196,7 @@ fn deterministic() {
 fn error_display_includes_values() {
     let data = [0u8; 10];
     let err = WsaFile::parse(&data).unwrap_err();
-    let msg = alloc::format!("{err}");
+    let msg = format!("{err}");
     assert!(msg.contains("14"));
     assert!(msg.contains("10"));
 }

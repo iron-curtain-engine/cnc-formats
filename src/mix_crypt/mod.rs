@@ -40,9 +40,6 @@
 //! - XCC Utilities MIX format documentation (Olaf van der Spek, 2000–2005)
 //! - `binary-codecs.md` in the Iron Curtain design-docs repository
 
-use alloc::vec;
-use alloc::vec::Vec;
-
 use crate::error::Error;
 use crate::read::{read_u16_le, read_u8};
 

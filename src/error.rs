@@ -18,7 +18,7 @@
 //! Stringly-typed errors are avoided: context tags use `&'static str` to
 //! prevent heap allocation in error paths.
 
-use core::fmt;
+use std::fmt;
 
 /// Errors that can occur while parsing C&C format files.
 ///
@@ -59,7 +59,7 @@ pub enum Error {
     ///
     /// The `reason` tag is a `&'static str` (not `String`) to keep the error
     /// type allocation-free — important because decompression runs on hot
-    /// paths and the error type must be `no_std`-compatible.
+    /// paths.
     DecompressionError {
         /// What went wrong during decompression.
         reason: &'static str,
@@ -120,3 +120,5 @@ impl fmt::Display for Error {
         }
     }
 }
+
+impl std::error::Error for Error {}

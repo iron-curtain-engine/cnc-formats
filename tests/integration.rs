@@ -4,11 +4,12 @@
 //! Integration tests — cross-module workflows that exercise the full parsing
 //! pipeline, not just individual format parsers in isolation.
 
-extern crate alloc;
-
 use cnc_formats::aud::{self, AudFile, AUD_FLAG_16BIT, SCOMP_WESTWOOD};
 use cnc_formats::fnt::FntFile;
+use cnc_formats::ini::IniFile;
 use cnc_formats::lcw;
+#[cfg(feature = "miniyaml")]
+use cnc_formats::miniyaml::MiniYamlDoc;
 use cnc_formats::mix::{self, MixArchive};
 use cnc_formats::pal::{Palette, PALETTE_BYTES};
 use cnc_formats::shp::ShpFile;
@@ -478,4 +479,66 @@ fn all_new_parsers_adversarial_all_ff() {
     let _ = FntFile::parse(&data);
     let _ = tmp::TdTmpFile::parse(&data);
     let _ = tmp::RaTmpFile::parse(&data);
+    let _ = IniFile::parse(&data);
+}
+
+// ── Text format integration tests ────────────────────────────────────────────
+
+/// INI: parse a realistic C&C rules fragment with multiple sections.
+///
+/// Why: integration-level confidence that `IniFile::parse` works
+/// end-to-end with a typical multi-section rules file.
+#[test]
+fn ini_parse_realistic_rules() {
+    let input = b"\
+[General]
+Name=Red Alert
+Version=3.03
+
+[E1]
+Name=Rifle Infantry
+Strength=50
+Speed=4
+";
+    let ini = IniFile::parse(input).unwrap();
+    assert_eq!(ini.section_count(), 2);
+    assert_eq!(ini.get("General", "Name"), Some("Red Alert"));
+    assert_eq!(ini.get("E1", "Strength"), Some("50"));
+}
+
+/// INI: adversarial all-`0xFF` bytes (invalid UTF-8) must not panic.
+#[test]
+fn ini_adversarial_all_ff() {
+    let data = vec![0xFFu8; 512];
+    let _ = IniFile::parse(&data);
+}
+
+/// MiniYAML: parse a realistic OpenRA unit definition.
+///
+/// Why: integration-level confidence that `MiniYamlDoc::parse` works
+/// end-to-end with a typical OpenRA mod file.
+#[cfg(feature = "miniyaml")]
+#[test]
+fn miniyaml_parse_realistic_unit() {
+    let input = b"\
+Inherits: @infantry
+Name: Rifle Infantry
+Health:
+\tHP: 100
+Mobile:
+\tSpeed: 56
+";
+    let doc = MiniYamlDoc::parse(input).unwrap();
+    assert_eq!(doc.nodes().len(), 4);
+    assert_eq!(doc.node("Inherits").unwrap().value(), Some("@infantry"));
+    let health = doc.node("Health").unwrap();
+    assert_eq!(health.child("HP").unwrap().value(), Some("100"));
+}
+
+/// MiniYAML: adversarial all-`0xFF` bytes (invalid UTF-8) must not panic.
+#[cfg(feature = "miniyaml")]
+#[test]
+fn miniyaml_adversarial_all_ff() {
+    let data = vec![0xFFu8; 512];
+    let _ = MiniYamlDoc::parse(&data);
 }

@@ -2,8 +2,6 @@
 // Copyright (c) 2025-present Iron Curtain contributors
 
 use super::*;
-use alloc::string::ToString;
-use alloc::vec;
 
 /// The `0x80` end-of-stream marker by itself produces empty output.
 ///

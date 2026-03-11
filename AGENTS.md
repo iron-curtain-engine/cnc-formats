@@ -8,6 +8,12 @@
 - Design docs repo: `https://github.com/iron-curtain-engine/iron-curtain-design-docs`
 - Design-doc baseline revision: `HEAD`
 
+**If this file conflicts with the design-docs repo, the design-docs repo wins.**
+The design repo has broader context and understanding of the overall
+architecture.  This file is a local implementation guide, not a design
+authority.  When in doubt, check the design docs.  If you have questions,
+raise them by opening an issue in the design-docs repo.
+
 Primary canonical references:
 
 - `src/05-FORMATS.md` — file format specifications
@@ -50,8 +56,15 @@ Per D076, `cnc-formats` must parse **all** C&C binary formats:
 | `wsa`  | `.wsa` | Implemented | LCW + XOR-delta animation                             |
 | `fnt`  | `.fnt` | Implemented | 256-glyph fixed-height bitmap fonts                   |
 
-Text format parsing (`.ini`, MiniYAML) is also in D076 scope but is a
-separate concern from binary codecs.
+| `ini`  | `.ini` | Implemented | Classic C&C rules format (always enabled)              |
+| `miniyaml` | MiniYAML | Implemented | OpenRA rules format (behind `miniyaml` feature flag)  |
+| `miniyaml2yaml` | — | Implemented | MiniYAML→YAML converter (behind `miniyaml` feature flag) |
+
+Text format parsing (`.ini`, MiniYAML) was originally planned as a separate
+`cnc-text-formats` crate but was merged back into `cnc-formats` — `.ini` is as
+much a classic C&C format as `.mix` or `.shp`, and the separate crate added
+unjustified overhead. MiniYAML (OpenRA-originated, community standard) lives
+behind a `miniyaml` feature flag so consumers who don't need it pay nothing.
 
 ## Engine Architecture Context
 
@@ -63,8 +76,9 @@ govern this crate are:
   permissive-licensed half of this responsibility; `ra-formats` (GPL v3)
   covers the EA-derived half.
 - **Invariant 10 — Platform-agnostic design:** parsers must not assume a
-  filesystem, OS threading model, or allocator. Prefer `&[u8]` input and
-  `#![no_std]` + `alloc` output over `std::fs`-coupled APIs.
+  specific OS or threading model. Prefer `&[u8]` input as the primary parsing
+  API; use `std::io::Read` for streaming large files (`.mix` archives, `.vqa`
+  video). Do not couple to `std::fs` — callers provide the bytes or reader.
 
 The other eight invariants (determinism, networking, modding, Bevy, YAML,
 OpenRA compat, game-agnostic core, performance) are engine-layer concerns
@@ -102,10 +116,15 @@ sanctioned by `binary-codecs.md`.
 This crate must **never** depend on any `ic-*` crate. It is a standalone library
 usable by any project regardless of license.
 
-### 3. `#![no_std]` Where Possible
+### 3. `std` by Default
 
-Maximize portability. Use `#![no_std]` with optional `alloc` feature for
-heap-dependent functionality.
+This crate uses `std`. Format parsers' consumers are always desktop, mobile,
+or browser applications with full `std` support. `std` enables `std::io::Read`
+streaming (critical for large `.mix`/`.vqa` files), `std::error::Error`
+ergonomics, and `HashMap` without extra dependencies. `#![no_std]` is reserved
+for genuinely universal libraries like `fixed-game-math` and `deterministic-rng`
+(math/PRNG). There is no realistic scenario where C&C format parsers run on a
+microcontroller or in a kernel module.
 
 ### 4. No GPL Dependencies
 
@@ -240,6 +259,14 @@ src/
   fnt/
     mod.rs            — production code (256-glyph bitmap font parser)
     tests.rs          — tests
+  ini/
+    mod.rs            — production code (classic C&C INI rules parser)
+    tests.rs          — tests
+  miniyaml/
+    mod.rs            — production code (OpenRA MiniYAML parser + to_yaml)
+    tests.rs          — tests
+  bin/
+    miniyaml2yaml.rs  — CLI converter (MiniYAML → standard YAML)
 tests/
   integration.rs      — cross-module integration tests
 ```
@@ -258,8 +285,7 @@ tests/
    security-critical foundations (see "read.rs Foundation Tests" below);
    `error.rs` has no tests of its own.
 3. **Test files use `use super::*;`** as first import to access everything from
-   `mod.rs`.  Additional test-only imports (`alloc::vec`, `alloc::string`, etc.)
-   follow.
+   `mod.rs`.
 4. **Test helpers** (e.g. `build_mix`, `build_shp`) live in `tests.rs`, not in
    `mod.rs`.  They are only needed by test code and should not contribute to
    production code context.
@@ -372,11 +398,12 @@ integer.
 - **Strict on structural integrity.** Offsets, sizes, and counts must be
   validated against actual buffer lengths before any slice operation.
 
-### `#![no_std]` and Allocation
+### `std` and Allocation
 
-- The crate is `#![no_std]` with `extern crate alloc`. Use `alloc` types
-  (`Vec`, `String`) not `std` equivalents.
-- Imports in test modules use `alloc::{vec, vec::Vec, string::ToString}` etc.
+- The crate uses `std`. Use standard library types (`Vec`, `String`, `HashMap`)
+  as appropriate.
+- The `&[u8]` parsing API remains the primary interface (callers provide bytes).
+  `std::io::Read`-based streaming APIs are available for large files.
 
 ### Heap Allocation Policy
 
@@ -434,6 +461,8 @@ allocation to reduce allocator overhead, GC pauses, and memory fragmentation.
 | `vqa`       | 2 (chunk + frame Vecs)  | 0                    | Chunk data borrows input    |
 | `wsa`       | 2 (offset + frame Vecs) | 0                    | Frame data borrows input    |
 | `fnt`       | 1 (glyph Vec)           | 0                    | Glyph data borrows input    |
+| `ini`       | 3 (HashMap + 2 Vecs)    | 0                    | String allocs per entry     |
+| `miniyaml`  | N (node tree)           | 0                    | String allocs per node      |
 
 ### Implementation Comments (What / Why / How)
 
