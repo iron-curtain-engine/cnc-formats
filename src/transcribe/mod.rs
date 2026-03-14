@@ -30,11 +30,17 @@
 //!
 //! ## Example
 //!
-//! ```ignore
+//! ```
 //! use cnc_formats::transcribe::{TranscribeConfig, pcm_to_mid};
 //!
+//! // 440 Hz sine wave at 44 100 Hz sample rate (one second).
+//! let sample_rate = 44_100u32;
+//! let pcm_samples: Vec<f32> = (0..sample_rate)
+//!     .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate as f32).sin())
+//!     .collect();
 //! let config = TranscribeConfig::default();
-//! let midi_bytes = pcm_to_mid(&pcm_samples, 44100, &config)?;
+//! let midi_bytes = pcm_to_mid(&pcm_samples, sample_rate, &config).unwrap();
+//! assert!(!midi_bytes.is_empty());
 //! ```
 //!
 //! ## References

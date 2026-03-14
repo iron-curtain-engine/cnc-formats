@@ -371,3 +371,89 @@ fn convert_error_display_includes_reason() {
         "Display should include the conversion reason: {msg}",
     );
 }
+
+// ── AUD chunk-header regression tests ───────────────────────────────────────
+
+/// SCOMP=99 AUD with 0xDEAF chunk headers produces clean WAV output.
+///
+/// Why: RA1's IMA ADPCM files wrap every ~512 bytes of ADPCM data in an
+/// 8-byte header (u16 compressed_size, u16 output_size, u32 0x0000DEAF).
+/// If the headers are NOT stripped, they decode as audio nibbles, producing
+/// audible clicks/pops every 520 bytes.  This test builds a minimal chunked
+/// AUD and verifies the decoded samples contain no header-derived garbage.
+#[test]
+fn aud_scomp99_chunk_headers_stripped() {
+    // Build a SCOMP=99 AUD with 2 chunks, each containing 4 bytes of
+    // ADPCM silence (all zeros → decoded samples stay near zero).
+    let adpcm_chunk = [0u8; 4]; // 4 bytes = 8 samples of near-silence
+    let mut compressed = Vec::new();
+    for _ in 0..2 {
+        // Chunk header: compressed_size=4, output_size=16, magic=0xDEAF
+        compressed.extend_from_slice(&4u16.to_le_bytes());
+        compressed.extend_from_slice(&16u16.to_le_bytes());
+        compressed.extend_from_slice(&0x0000_DEAFu32.to_le_bytes());
+        compressed.extend_from_slice(&adpcm_chunk);
+    }
+
+    // Build AUD file: 12-byte header + compressed data.
+    let mut aud_bytes = Vec::new();
+    aud_bytes.extend_from_slice(&22050u16.to_le_bytes()); // sample_rate
+    aud_bytes.extend_from_slice(&(compressed.len() as u32).to_le_bytes()); // compressed_size
+    aud_bytes.extend_from_slice(&32u32.to_le_bytes()); // uncompressed_size (16 samples × 2 bytes)
+    aud_bytes.push(AUD_FLAG_16BIT); // flags: 16-bit mono
+    aud_bytes.push(99); // compression: IMA ADPCM (SCOMP=99)
+    aud_bytes.extend_from_slice(&compressed);
+
+    let aud = AudFile::parse(&aud_bytes).unwrap();
+    let wav = aud_to_wav(&aud).unwrap();
+
+    // WAV should be valid RIFF.
+    assert_eq!(&wav[..4], b"RIFF", "output must be a RIFF WAV file");
+
+    // Decode the WAV samples and verify they're near-zero (silence).
+    // If headers weren't stripped, the 0xDEAF bytes would produce large
+    // sample values (audible garbage).
+    let reader = hound::WavReader::new(std::io::Cursor::new(&wav)).unwrap();
+    let samples: Vec<i16> = reader.into_samples::<i16>().map(|s| s.unwrap()).collect();
+    assert!(!samples.is_empty(), "WAV should contain decoded samples");
+    // All samples from silence ADPCM should have absolute value < 50.
+    // Header garbage would produce values in the thousands.
+    for (i, &s) in samples.iter().enumerate() {
+        assert!(
+            s.abs() < 50,
+            "sample {i} = {s}: header byte leaked into audio (expected near-zero)"
+        );
+    }
+}
+
+/// SCOMP=1 AUD (Westwood ADPCM, no chunk headers) still decodes correctly.
+///
+/// Why: the chunk-header stripping must only apply to SCOMP=99.  SCOMP=1
+/// files have raw ADPCM data without 0xDEAF wrappers.  If the stripper
+/// accidentally runs on SCOMP=1, it would corrupt the audio.
+#[test]
+fn aud_scomp1_no_chunk_stripping() {
+    // Build a SCOMP=1 AUD with raw ADPCM silence.
+    let adpcm = [0u8; 8]; // 8 bytes = 16 samples of silence
+    let mut aud_bytes = Vec::new();
+    aud_bytes.extend_from_slice(&22050u16.to_le_bytes());
+    aud_bytes.extend_from_slice(&(adpcm.len() as u32).to_le_bytes());
+    aud_bytes.extend_from_slice(&32u32.to_le_bytes());
+    aud_bytes.push(AUD_FLAG_16BIT);
+    aud_bytes.push(SCOMP_WESTWOOD); // compression: Westwood ADPCM (ID 1)
+    aud_bytes.extend_from_slice(&adpcm);
+
+    let aud = AudFile::parse(&aud_bytes).unwrap();
+    let wav = aud_to_wav(&aud).unwrap();
+    assert_eq!(&wav[..4], b"RIFF");
+
+    let reader = hound::WavReader::new(std::io::Cursor::new(&wav)).unwrap();
+    let samples: Vec<i16> = reader.into_samples::<i16>().map(|s| s.unwrap()).collect();
+    assert!(!samples.is_empty());
+    for (i, &s) in samples.iter().enumerate() {
+        assert!(
+            s.abs() < 50,
+            "sample {i} = {s}: SCOMP=1 silence should decode to near-zero"
+        );
+    }
+}

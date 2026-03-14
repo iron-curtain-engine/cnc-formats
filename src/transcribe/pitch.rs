@@ -155,8 +155,8 @@ fn yin_pitch(
 /// Combines the difference function computation with normalisation in a
 /// single pass to avoid a separate allocation for d(τ).
 ///
-/// d(τ) = Σ_{j=0}^{W/2-1} (x[j] - x[j+τ])²
-/// d'(τ) = d(τ) / ((1/τ) × Σ_{j=1}^{τ} d(j))    for τ > 0
+/// d(τ) = Σ\_{j=0}^{W/2-1} (x\[j\] - x\[j+τ\])²
+/// d'(τ) = d(τ) / ((1/τ) × Σ\_{j=1}^{τ} d(j))    for τ > 0
 /// d'(0) = 1.0
 fn yin_cmnd(window: &[f32], max_tau: usize) -> Vec<f32> {
     let w = window.len() / 2;

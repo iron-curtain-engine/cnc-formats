@@ -175,6 +175,7 @@ fn check_mix(data: &[u8], warnings: &mut Vec<String>, errors: &mut Vec<String>) 
 
 /// Deep integrity checks for MEG archives.
 #[cfg(feature = "meg")]
+#[allow(clippy::ptr_arg)]
 fn check_meg(data: &[u8], _warnings: &mut Vec<String>, errors: &mut Vec<String>) {
     let archive = match cnc_formats::meg::MegArchive::parse(data) {
         Ok(a) => a,

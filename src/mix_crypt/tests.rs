@@ -716,5 +716,11 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
 
 /// Helper: convert bytes to hex string.
 fn bytes_to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }

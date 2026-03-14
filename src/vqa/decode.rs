@@ -423,7 +423,7 @@ impl<'a> VqaDecoder<'a> {
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-impl<'a> VqaFile<'a> {
+impl VqaFile<'_> {
     /// Decodes all video frames from the VQA container.
     ///
     /// Iterates chunks in file order, maintaining codebook/palette state,

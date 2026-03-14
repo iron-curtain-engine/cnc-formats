@@ -280,6 +280,7 @@ mod tests {
     }
 
     /// SHP detection uses structural heuristics.
+    #[cfg(feature = "convert")]
     #[test]
     fn sniff_shp_from_parsed_file() {
         // Build a minimal valid SHP: 1 frame, 2×2 pixels, LCW-compressed.

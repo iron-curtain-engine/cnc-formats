@@ -239,9 +239,9 @@ impl<'a> MegArchive<'a> {
     /// Returns the file data for the entry at `index`, or `None` if the
     /// index is out of bounds or the slice falls outside the archive.
     ///
-    /// This is the preferred accessor when iterating [`entries()`] because
+    /// This is the preferred accessor when iterating `entries()` because
     /// it uses the entry's own offset/size directly, avoiding the
-    /// first-match ambiguity of [`get()`] when an archive contains
+    /// first-match ambiguity of `get()` when an archive contains
     /// duplicate or case-colliding filenames.
     pub fn get_by_index(&self, index: usize) -> Option<&'a [u8]> {
         let entry = self.entries.get(index)?;
