@@ -28,7 +28,9 @@ jobs:
                     [
                         fuzz_aud,
                         fuzz_fnt,
+                        fuzz_ini,
                         fuzz_lcw,
+                        fuzz_miniyaml,
                         fuzz_mix,
                         fuzz_pal,
                         fuzz_shp,

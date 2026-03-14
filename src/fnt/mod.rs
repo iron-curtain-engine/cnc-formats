@@ -3,52 +3,63 @@
 
 //! FNT bitmap font parser (`.fnt`).
 //!
-//! FNT files store fixed-height bitmap fonts used for in-game text rendering.
-//! Each file contains up to 256 glyphs (one per byte value), each stored as
-//! a column-major 1-bit-per-pixel bitmap.
+//! FNT files store fixed-height bitmap fonts used for in-game text rendering
+//! in Tiberian Dawn and Red Alert.  Each file contains a variable number of
+//! glyphs (up to 256), each stored as **4bpp nibble-packed row-major** data.
 //!
 //! ## File Layout
 //!
+//! The header uses a block-offset design: five logical blocks (info, offsets,
+//! widths, data, heights) are located by `u16` pointers stored in the header.
+//! This matches EA's `FontHeader` struct from `TIBERIANDAWN/WIN32LIB/FONT.H`
+//! and the `Buffer_Print` renderer in Vanilla-Conquer's `common/font.cpp`.
+//!
 //! ```text
-//! [FntHeader]            6 bytes
-//! [char widths]          256 × u16 LE  (pixel width of each glyph)
-//! [char offsets]         256 × u16 LE  (byte offset to glyph data)
-//! [glyph data ...]       variable-length bitmap data
+//! [FntHeader]            20 bytes  (block-offset header)
+//! [info block]           4 bytes   (at InfoBlockOffset, font metrics)
+//! [offset table]         num_chars × u16 LE (at OffsetBlockOffset)
+//! [width table]          num_chars × u8     (at WidthBlockOffset)
+//! [glyph data ...]       variable           (at DataBlockOffset)
+//! [height table]         num_chars × u16 LE (at HeightOffset)
 //! ```
 //!
 //! ## Glyph Encoding
 //!
-//! Each glyph is stored as `ceil(height / 8) × width` bytes.  The glyph
-//! is drawn column-by-column, left to right.  Each column is stored as
-//! `ceil(height / 8)` bytes, with bits packed top-to-bottom: bit 0 of
-//! the first byte is the topmost pixel of that column.
+//! Each glyph is stored as `ceil(width / 2) × data_rows` bytes.  Pixels are
+//! packed two per byte (4 bits each), row-major, low nibble first.  Color
+//! index 0 is transparent; indices 1–15 map through a color translation table
+//! (not stored in the FNT file — the game supplies it at render time).
 //!
 //! A glyph with width 0 has no pixel data (space character).
 //!
+//! ## Height Table
+//!
+//! Each entry is a `u16` where the low byte is the Y-offset (vertical
+//! position of the glyph's first row within the character cell) and the
+//! high byte is the number of data rows actually stored.  This allows
+//! glyphs to omit leading/trailing transparent rows.
+//!
 //! ## References
 //!
-//! Format source: community documentation from the C&C Modding Wiki,
-//! XCC Utilities source code, and binary analysis of game `.mix` archives.
+//! - EA FONT.H / FONT.CPP / SET_FONT.CPP / LOADFONT.CPP
+//!   (`CnC_Remastered_Collection/TIBERIANDAWN/WIN32LIB/`)
+//! - Vanilla-Conquer `common/font.cpp` (decompiled `FontHeader` + `Buffer_Print`)
+//! - TXTPRNT.ASM (confirms 4bpp nibble-packed rendering)
 
 use crate::error::Error;
 use crate::read::{read_u16_le, read_u8};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-/// Number of character entries in a FNT file (one per byte value).
-pub const FNT_CHAR_COUNT: usize = 256;
+/// Size of the FNT file header in bytes (block-offset header).
+const FNT_HEADER_SIZE: usize = 20;
 
-/// Size of the FNT file header in bytes.
-const FNT_HEADER_SIZE: usize = 6;
+/// Expected number of data blocks in a valid FNT file.
+/// EA's LOADFONT.CPP checks `FontDataBlocks == 5`.
+const EXPECTED_DATA_BLOCKS: u8 = 5;
 
-/// Size of the character width table (256 × u16 = 512 bytes).
-const CHAR_WIDTHS_SIZE: usize = FNT_CHAR_COUNT * 2;
-
-/// Size of the character offset table (256 × u16 = 512 bytes).
-const CHAR_OFFSETS_SIZE: usize = FNT_CHAR_COUNT * 2;
-
-/// Minimum file size: header + width table + offset table.
-const MIN_FILE_SIZE: usize = FNT_HEADER_SIZE + CHAR_WIDTHS_SIZE + CHAR_OFFSETS_SIZE;
+/// V38: maximum number of characters per font file.
+const MAX_CHAR_COUNT: usize = 256;
 
 /// V38: maximum font height in pixels.  Real-world FNT files use heights
 /// of 6–16 pixels; 256 provides generous headroom.
@@ -59,57 +70,92 @@ const MAX_GLYPH_WIDTH: usize = 256;
 
 // ─── Header ──────────────────────────────────────────────────────────────────
 
-/// Parsed FNT file header.
+/// Parsed FNT file header (20 bytes).
+///
+/// Matches EA's `FontHeader` struct from Vanilla-Conquer `common/font.cpp`.
+/// The five block-offset fields locate the logical sections within the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FntHeader {
-    /// Total file data size (from header, informational).
-    pub data_size: u16,
-    /// Font height in pixels (all glyphs share the same height).
-    pub height: u8,
-    /// Maximum glyph width in pixels.
+    /// Total font data length in bytes (from file, informational).
+    pub font_length: u16,
+    /// Compression flag (0 = uncompressed; only 0 is supported).
+    pub compress: u8,
+    /// Number of data blocks (must be 5 for TD/RA fonts).
+    pub data_blocks: u8,
+    /// Byte offset to the info block (typically 0x0010 = 16).
+    pub info_block_offset: u16,
+    /// Byte offset to the per-character offset table (typically 0x0014 = 20).
+    pub offset_block_offset: u16,
+    /// Byte offset to the per-character width table.
+    pub width_block_offset: u16,
+    /// Byte offset to the glyph data section.
+    pub data_block_offset: u16,
+    /// Byte offset to the per-character height table.
+    pub height_offset: u16,
+    /// Unknown constant (0x1012 or 0x1011 in game files).
+    pub unknown_const: u16,
+    /// Number of characters (= raw field value + 1; raw field = last char index).
+    pub num_chars: u16,
+    /// Maximum glyph height across all characters.
+    pub max_height: u8,
+    /// Maximum glyph width across all characters.
     pub max_width: u8,
-    /// Unknown/reserved field (typically 0).
-    pub unknown: u16,
 }
 
 // ─── Glyph ───────────────────────────────────────────────────────────────────
 
 /// A single glyph from a FNT file.
 ///
-/// The glyph's pixel data is column-major, 1 bit per pixel, packed into
-/// `ceil(height / 8)` bytes per column.  Use [`FntGlyph::pixel`] to
-/// query individual pixels.
+/// Glyph pixel data is 4bpp nibble-packed, row-major.  Two pixels per byte,
+/// low nibble first.  Use [`FntGlyph::pixel`] to query individual pixel
+/// color indices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FntGlyph<'a> {
     /// Character code point (0–255).
     pub code: u8,
     /// Glyph width in pixels.
-    pub width: u16,
-    /// Font height in pixels (shared across all glyphs).
-    pub height: u8,
-    /// Raw column-major bitmap data (borrowed from input).
+    pub width: u8,
+    /// Y-offset of first data row within the character cell.
+    pub y_offset: u8,
+    /// Number of pixel rows actually stored in the glyph data.
+    pub data_rows: u8,
+    /// Raw 4bpp nibble-packed row-major bitmap data (borrowed from input).
+    /// Size: `ceil(width / 2) × data_rows` bytes.
     pub data: &'a [u8],
 }
 
 impl FntGlyph<'_> {
-    /// Returns `true` if the pixel at `(x, y)` is set (foreground).
+    /// Returns the 4-bit color index at pixel `(x, y)` within the glyph's
+    /// local coordinate space (relative to `y_offset`).
     ///
-    /// Coordinates: `x` is column (0 = left), `y` is row (0 = top).
-    /// Returns `false` for out-of-bounds coordinates or zero-width glyphs.
+    /// Coordinates: `x` is column (0 = left), `y` is row (0 = top of data).
+    /// Returns 0 (transparent) for out-of-bounds coordinates, zero-width
+    /// glyphs, or zero-row glyphs.
+    ///
+    /// The returned value is a 4-bit palette index (0–15).  Color 0 is
+    /// always transparent; indices 1–15 are mapped through a color
+    /// translation table supplied by the renderer.
     #[inline]
-    pub fn pixel(&self, x: u16, y: u8) -> bool {
-        if x >= self.width || y >= self.height || self.data.is_empty() {
-            return false;
+    pub fn pixel(&self, x: u8, y: u8) -> u8 {
+        if x >= self.width || y >= self.data_rows || self.data.is_empty() {
+            return 0;
         }
-        // Each column is ceil(height / 8) bytes.
-        let bytes_per_col = (self.height as usize).div_ceil(8);
-        let col_start = (x as usize).saturating_mul(bytes_per_col);
-        let byte_idx = col_start.saturating_add(y as usize / 8);
-        let bit_idx = y % 8;
-        // Use .get() for defense-in-depth on the bitmap data.
-        self.data
-            .get(byte_idx)
-            .is_some_and(|&b| (b >> bit_idx) & 1 != 0)
+        // Each row is ceil(width / 2) bytes.  Two pixels per byte,
+        // low nibble = left pixel, high nibble = right pixel.
+        let bytes_per_row = (self.width as usize).div_ceil(2);
+        let byte_idx = (y as usize)
+            .saturating_mul(bytes_per_row)
+            .saturating_add(x as usize / 2);
+        let byte_val = match self.data.get(byte_idx) {
+            Some(&b) => b,
+            None => return 0,
+        };
+        // Low nibble = even x, high nibble = odd x.
+        if x % 2 == 0 {
+            byte_val & 0x0F
+        } else {
+            (byte_val >> 4) & 0x0F
+        }
     }
 }
 
@@ -117,13 +163,13 @@ impl FntGlyph<'_> {
 
 /// Parsed FNT bitmap font file.
 ///
-/// Contains the font header and all 256 glyph entries.  Glyphs with
-/// width 0 have empty data (space characters, unused code points).
+/// Contains the font header and all glyph entries.  Glyphs with width 0
+/// have empty data (space characters, unused code points).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FntFile<'a> {
     /// File header.
     pub header: FntHeader,
-    /// All 256 glyph entries (indexed by character code).
+    /// Glyph entries (indexed by character code, length = `header.num_chars`).
     pub glyphs: Vec<FntGlyph<'a>>,
 }
 
@@ -133,50 +179,122 @@ impl<'a> FntFile<'a> {
     /// # Errors
     ///
     /// - [`Error::UnexpectedEof`] if the input is truncated.
-    /// - [`Error::InvalidSize`] if font height exceeds the V38 cap.
+    /// - [`Error::InvalidSize`] if font height, glyph width, or character
+    ///   count exceed V38 caps.
+    /// - [`Error::InvalidMagic`] if the compression flag is non-zero or
+    ///   the data-block count is not 5.
     pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
-        // ── Header ───────────────────────────────────────────────────────
-        if data.len() < MIN_FILE_SIZE {
+        // ── Header (20 bytes) ────────────────────────────────────────────
+        if data.len() < FNT_HEADER_SIZE {
             return Err(Error::UnexpectedEof {
-                needed: MIN_FILE_SIZE,
+                needed: FNT_HEADER_SIZE,
                 available: data.len(),
             });
         }
 
-        let data_size = read_u16_le(data, 0)?;
-        let height = read_u8(data, 2)?;
-        let max_width = read_u8(data, 3)?;
-        let unknown = read_u16_le(data, 4)?;
+        let font_length = read_u16_le(data, 0)?;
+        let compress = read_u8(data, 2)?;
+        let data_blocks = read_u8(data, 3)?;
+        let info_block_offset = read_u16_le(data, 4)?;
+        let offset_block_offset = read_u16_le(data, 6)?;
+        let width_block_offset = read_u16_le(data, 8)?;
+        let data_block_offset = read_u16_le(data, 10)?;
+        let height_offset = read_u16_le(data, 12)?;
+        let unknown_const = read_u16_le(data, 14)?;
+        // Byte 16 is padding, byte 17 is char_count_raw (last character index).
+        let _pad = read_u8(data, 16)?;
+        let char_count_raw = read_u8(data, 17)?;
+        let max_height = read_u8(data, 18)?;
+        let max_width = read_u8(data, 19)?;
+
+        // Number of characters = last_char_index + 1.
+        let num_chars = (char_count_raw as u16).saturating_add(1);
+
+        // ── Validation ───────────────────────────────────────────────────
+        // EA's LOADFONT.CPP requires compress == 0 and data_blocks == 5.
+        if compress != 0 {
+            return Err(Error::InvalidMagic {
+                context: "FNT compression flag (expected 0)",
+            });
+        }
+        if data_blocks != EXPECTED_DATA_BLOCKS {
+            return Err(Error::InvalidMagic {
+                context: "FNT data blocks (expected 5)",
+            });
+        }
+
+        // V38: cap character count.
+        if (num_chars as usize) > MAX_CHAR_COUNT {
+            return Err(Error::InvalidSize {
+                value: num_chars as usize,
+                limit: MAX_CHAR_COUNT,
+                context: "FNT character count",
+            });
+        }
 
         // V38: cap font height.
-        if (height as usize) > MAX_FONT_HEIGHT {
+        if (max_height as usize) > MAX_FONT_HEIGHT {
             return Err(Error::InvalidSize {
-                value: height as usize,
+                value: max_height as usize,
                 limit: MAX_FONT_HEIGHT,
                 context: "FNT font height",
             });
         }
 
         let header = FntHeader {
-            data_size,
-            height,
+            font_length,
+            compress,
+            data_blocks,
+            info_block_offset,
+            offset_block_offset,
+            width_block_offset,
+            data_block_offset,
+            height_offset,
+            unknown_const,
+            num_chars,
+            max_height,
             max_width,
-            unknown,
         };
 
-        // ── Width + Offset Tables ────────────────────────────────────────
-        let widths_start = FNT_HEADER_SIZE;
-        let offsets_start = widths_start.saturating_add(CHAR_WIDTHS_SIZE);
+        // ── Table bounds checks ──────────────────────────────────────────
+        let nc = num_chars as usize;
 
-        // The bytes_per_col for this font height.
-        let bytes_per_col = (height as usize).div_ceil(8);
+        // Width table: num_chars × u8 at width_block_offset.
+        let wb_start = width_block_offset as usize;
+        let wb_end = wb_start.saturating_add(nc);
+        if wb_end > data.len() {
+            return Err(Error::UnexpectedEof {
+                needed: wb_end,
+                available: data.len(),
+            });
+        }
 
-        // ── Glyphs ───────────────────────────────────────────────────────
-        let mut glyphs = Vec::with_capacity(FNT_CHAR_COUNT);
+        // Offset table: num_chars × u16 at offset_block_offset.
+        let ob_start = offset_block_offset as usize;
+        let ob_end = ob_start.saturating_add(nc.saturating_mul(2));
+        if ob_end > data.len() {
+            return Err(Error::UnexpectedEof {
+                needed: ob_end,
+                available: data.len(),
+            });
+        }
 
-        for i in 0..FNT_CHAR_COUNT {
-            let w_pos = widths_start.saturating_add(i.saturating_mul(2));
-            let glyph_width = read_u16_le(data, w_pos)?;
+        // Height table: num_chars × u16 at height_offset.
+        let hb_start = height_offset as usize;
+        let hb_end = hb_start.saturating_add(nc.saturating_mul(2));
+        if hb_end > data.len() {
+            return Err(Error::UnexpectedEof {
+                needed: hb_end,
+                available: data.len(),
+            });
+        }
+
+        // ── Glyphs ──────────────────────────────────────────────────────
+        let mut glyphs = Vec::with_capacity(nc);
+
+        for i in 0..nc {
+            // Width: u8 at width_block_offset + i.
+            let glyph_width = read_u8(data, wb_start.saturating_add(i))?;
 
             // V38: cap individual glyph width.
             if (glyph_width as usize) > MAX_GLYPH_WIDTH {
@@ -187,36 +305,46 @@ impl<'a> FntFile<'a> {
                 });
             }
 
-            let o_pos = offsets_start.saturating_add(i.saturating_mul(2));
-            let glyph_offset = read_u16_le(data, o_pos)? as usize;
+            // Height entry: u16 at height_offset + i*2.
+            // Low byte = y_offset, high byte = data_rows.
+            let h_pos = hb_start.saturating_add(i.saturating_mul(2));
+            let height_entry = read_u16_le(data, h_pos)?;
+            let y_offset = (height_entry & 0xFF) as u8;
+            let data_rows = ((height_entry >> 8) & 0xFF) as u8;
 
-            // Zero-width glyphs have no pixel data.
-            if glyph_width == 0 {
+            // Glyph data offset: u16 at offset_block_offset + i*2.
+            let o_pos = ob_start.saturating_add(i.saturating_mul(2));
+            let glyph_data_offset = read_u16_le(data, o_pos)? as usize;
+
+            // Zero-width or zero-row glyphs have no pixel data.
+            if glyph_width == 0 || data_rows == 0 {
                 glyphs.push(FntGlyph {
                     code: i as u8,
-                    width: 0,
-                    height,
+                    width: glyph_width,
+                    y_offset,
+                    data_rows,
                     data: &[],
                 });
                 continue;
             }
 
-            // Glyph data size: width × ceil(height / 8).
-            let glyph_size = (glyph_width as usize).saturating_mul(bytes_per_col);
+            // 4bpp: each row is ceil(width / 2) bytes.
+            let bytes_per_row = (glyph_width as usize).div_ceil(2);
+            let glyph_size = bytes_per_row.saturating_mul(data_rows as usize);
 
-            // The glyph offset is relative to the start of the file.
-            let glyph_end = glyph_offset.saturating_add(glyph_size);
-            let glyph_data = data
-                .get(glyph_offset..glyph_end)
-                .ok_or(Error::UnexpectedEof {
-                    needed: glyph_end,
-                    available: data.len(),
-                })?;
+            let glyph_end = glyph_data_offset.saturating_add(glyph_size);
+            let glyph_data =
+                data.get(glyph_data_offset..glyph_end)
+                    .ok_or(Error::UnexpectedEof {
+                        needed: glyph_end,
+                        available: data.len(),
+                    })?;
 
             glyphs.push(FntGlyph {
                 code: i as u8,
                 width: glyph_width,
-                height,
+                y_offset,
+                data_rows,
                 data: glyph_data,
             });
         }

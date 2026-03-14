@@ -20,11 +20,11 @@
 //!
 //! ```text
 //! [0x0000]      2 bytes  (extended marker)
-//! [flags]       2 bytes  (bit 1 = SHA-1 digest present, bit 2 = Blowfish encrypted)
+//! [flags]       2 bytes  (bit 0 = SHA-1 digest present, bit 1 = Blowfish encrypted)
 //! [FileHeader]  6 bytes
 //! [SubBlock × count]
-//! [optional SHA-1 digest]
 //! [file data]
+//! [optional SHA-1 digest]   20 bytes, present when flags bit 0 is set
 //! ```
 //!
 //! ## Blowfish-Encrypted Archives
@@ -54,15 +54,34 @@
 //! OpenRA's MIX loader, and binary analysis of game files.  Cross-reference:
 //! the original game defines the format in `MIXFILE.H`, `CRC.H`, `CRC.CPP`.
 
+pub mod known_names;
+pub mod lmd;
+pub mod metadata;
+
 use crate::error::Error;
 use crate::read::{read_u16_le, read_u32_le};
 
+use std::collections::HashMap;
+
+/// Builds a CRC→filename lookup map from the built-in TD/RA1 filename database.
+///
+/// Contains ~3,900 known filenames compiled into the binary.  This is
+/// useful as a default name map when the user doesn't supply `--names`.
+pub fn builtin_name_map() -> HashMap<MixCrc, String> {
+    let mut map = HashMap::with_capacity(known_names::KNOWN_FILENAMES.len());
+    for &name in known_names::KNOWN_FILENAMES {
+        map.insert(crc(name), name.to_string());
+    }
+    map
+}
+
 /// V38 safety cap: maximum number of entries in a MIX archive.
 ///
-/// Original RA archives contain ~1,500 entries; 16,384 is generous enough
-/// for any real archive while preventing a crafted header from allocating
-/// gigabytes of SubBlock entries (16,384 × 12 bytes = 192 KB, acceptable).
-pub(crate) const MAX_MIX_ENTRIES: usize = 16_384;
+/// RA1's MAIN.MIX contains ~64,000 entries (it nests sub-archives).
+/// 131,072 is generous enough for any real archive while preventing a
+/// crafted header from allocating gigabytes of SubBlock entries
+/// (131,072 × 12 bytes ≈ 1.5 MB, acceptable).
+pub(crate) const MAX_MIX_ENTRIES: usize = 131_072;
 
 // ─── CRC ─────────────────────────────────────────────────────────────────────
 
@@ -121,7 +140,9 @@ pub fn crc(filename: &str) -> MixCrc {
     for chunk in bytes.chunks(4) {
         let mut buf = [0u8; 4];
         for (j, &b) in chunk.iter().enumerate() {
-            buf[j] = b.to_ascii_uppercase();
+            if let Some(slot) = buf.get_mut(j) {
+                *slot = b.to_ascii_uppercase();
+            }
         }
         let word = u32::from_le_bytes(buf);
         // rotate_left(1) + wrapping_add: the publicly documented MIX CRC
@@ -135,8 +156,11 @@ pub fn crc(filename: &str) -> MixCrc {
 
 /// One entry in the MIX SubBlock index table.
 ///
-/// The SubBlock array is sorted by [`MixEntry::crc`] to allow binary-search
-/// lookup.
+/// The SubBlock array is sorted by CRC to allow binary-search lookup.
+/// On disk, entries are sorted by **signed** `i32` comparison (Westwood
+/// convention).  The parser re-sorts by unsigned `u32` after reading so
+/// that [`MixArchive::get_by_crc`] can use the derived [`Ord`] on
+/// [`MixCrc`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MixEntry {
     /// CRC hash of the file's uppercase name.
@@ -172,7 +196,6 @@ impl<'a> MixArchive<'a> {
     /// - [`Error::InvalidOffset`]  — a SubBlock offset points past the data.
     pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
         let mut pos = 0usize;
-        let mut has_sha1 = false;
 
         // ── Detect basic vs. extended format ──────────────────────────────
         //
@@ -209,8 +232,9 @@ impl<'a> MixArchive<'a> {
                     return Err(Error::EncryptedArchive);
                 }
             }
-            // Bit 0 = SHA-1 digest follows the SubBlock table.
-            has_sha1 = flags & 0x0001 != 0;
+            // Bit 0 = SHA-1 digest appended after the data section.
+            // We don't use this flag during parsing — digest verification
+            // is a cache-time concern (not implemented here).
             // Skip marker (2) + flags (2) = 4 bytes.
             pos = 4;
         }
@@ -253,21 +277,16 @@ impl<'a> MixArchive<'a> {
             pos += 12;
         }
 
-        // ── Optional SHA-1 digest (extended format, flags & 0x0001) ────────
-        // The 20-byte digest is not verified — we just skip past it to reach
-        // the file data section.  Verification is deferred to a future
-        // integrity-check API (if needed).
-        if has_sha1 {
-            if pos + 20 > data.len() {
-                return Err(Error::UnexpectedEof {
-                    needed: pos + 20,
-                    available: data.len(),
-                });
-            }
-            pos += 20; // skip the 20-byte SHA-1 digest
-        }
+        // Re-sort entries by unsigned CRC.  On disk, Westwood tools sort
+        // SubBlocks by signed i32 comparison.  Our binary_search uses the
+        // unsigned Ord derived on MixCrc(u32), so we re-sort to match.
+        entries.sort_by_key(|e| e.crc);
 
         // `pos` now points to the start of the file data section.
+        // The optional SHA-1 digest (flags bit 0) is stored at the END of
+        // the file, after DataSize bytes of data — not between the index
+        // and data.  We don't skip it here; it's simply trailing bytes
+        // that no SubBlock entry references.
         // All SubBlock offsets are relative to this point.
         let data_section = data.get(pos..).ok_or(Error::UnexpectedEof {
             needed: pos,
@@ -300,10 +319,11 @@ impl<'a> MixArchive<'a> {
     /// the flags word at offset 4.  After key derivation and header
     /// decryption, the file data section starts after the encrypted blocks.
     #[cfg(feature = "encrypted-mix")]
-    fn parse_encrypted(data: &'a [u8], flags: u16) -> Result<Self, Error> {
+    fn parse_encrypted(data: &'a [u8], _flags: u16) -> Result<Self, Error> {
         use crate::mix_crypt;
 
-        let has_sha1 = flags & 0x0001 != 0;
+        // flags bit 0 (SHA-1) is not used during parsing — the digest sits
+        // at the end of the file, after the data section.
 
         // ── Read key_source (80 bytes starting at offset 4) ──────────────
         let ks_start = 4usize;
@@ -376,24 +396,19 @@ impl<'a> MixArchive<'a> {
             pos += 12;
         }
 
+        // Re-sort entries by unsigned CRC (same reason as non-encrypted path).
+        entries.sort_by_key(|e| e.crc);
+
         // ── Locate data section ──────────────────────────────────────────
         // The encrypted blocks cover ceil((6 + count*12) / 8) * 8 bytes.
         let header_size = 6usize.saturating_add(count.saturating_mul(12));
         let num_blocks = header_size.div_ceil(8);
         let encrypted_len = num_blocks * 8;
-        let mut data_offset = encrypted_start.saturating_add(encrypted_len);
+        let data_offset = encrypted_start.saturating_add(encrypted_len);
 
-        // Skip optional SHA-1 digest (20 bytes after the encrypted header).
-        if has_sha1 {
-            let sha1_end = data_offset.saturating_add(20);
-            if sha1_end > data.len() {
-                return Err(Error::UnexpectedEof {
-                    needed: sha1_end,
-                    available: data.len(),
-                });
-            }
-            data_offset = sha1_end;
-        }
+        // The optional SHA-1 digest (flags bit 0) is at the END of the
+        // file, after the data section — not between the encrypted header
+        // and the data.  No skip needed here.
 
         if data_offset > data.len() {
             return Err(Error::UnexpectedEof {
@@ -446,7 +461,7 @@ impl<'a> MixArchive<'a> {
     #[inline]
     pub fn get_by_crc(&self, key: MixCrc) -> Option<&'a [u8]> {
         let idx = self.entries.binary_search_by_key(&key, |e| e.crc).ok()?;
-        let entry = &self.entries[idx];
+        let entry = self.entries.get(idx)?;
         let start = entry.offset as usize;
         let end = start.saturating_add(entry.size as usize);
         self.data.get(start..end)
@@ -463,7 +478,31 @@ impl<'a> MixArchive<'a> {
     pub fn file_count(&self) -> usize {
         self.entries.len()
     }
+
+    /// Extracts embedded filename mappings from the archive.
+    ///
+    /// Checks two sources in priority order:
+    ///
+    /// 1. **XCC local mix database** — an entry with CRC `0x54C2_D545`
+    ///    (the hash of `"local mix database.dat"`), containing filename
+    ///    strings in XCC's NUL-terminated format.
+    /// 2. **(future) CNFM trailing metadata** — not yet auto-detected
+    ///    during parse, but can be read from trailing bytes.
+    ///
+    /// Returns an empty map if no embedded names are found.
+    pub fn embedded_names(&self) -> HashMap<MixCrc, String> {
+        // Try XCC local mix database first.
+        if let Some(lmd_data) = self.get_by_crc(lmd::LMD_CRC) {
+            let names = lmd::parse_lmd(lmd_data);
+            if !names.is_empty() {
+                return names;
+            }
+        }
+        HashMap::new()
+    }
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_validation;

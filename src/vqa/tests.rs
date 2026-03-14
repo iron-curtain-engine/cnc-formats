@@ -22,6 +22,7 @@ fn write_u16_le(buf: &mut [u8], offset: usize, value: u16) {
 ///
 /// Sets reasonable defaults for a 320×200 video with 10 frames.
 /// `num_frames` is configurable; all other fields use typical RA values.
+/// Field layout matches EA VQAFILE.H `VQAHeader` struct.
 fn build_vqhd(num_frames: u16) -> [u8; 42] {
     let mut hd = [0u8; 42];
     write_u16_le(&mut hd, 0, 2); // version = 2
@@ -31,11 +32,13 @@ fn build_vqhd(num_frames: u16) -> [u8; 42] {
     write_u16_le(&mut hd, 8, 200); // height
     hd[10] = 4; // block_w
     hd[11] = 2; // block_h
-    hd[12] = 2; // cb_parts (codebook update parts per frame)
-    write_u16_le(&mut hd, 14, 8); // cb_entries
-    write_u16_le(&mut hd, 16, 0); // x_offset
-    write_u16_le(&mut hd, 18, 0); // y_offset
-    write_u16_le(&mut hd, 20, 0x2000); // max_frame_size
+    hd[12] = 15; // fps (frames per second)
+    hd[13] = 8; // groupsize (frames per codebook update cycle)
+    write_u16_le(&mut hd, 14, 27); // num_1_colors
+    write_u16_le(&mut hd, 16, 256); // cb_entries (total codebook entries)
+    write_u16_le(&mut hd, 18, 0); // x_pos
+    write_u16_le(&mut hd, 20, 0); // y_pos
+    write_u16_le(&mut hd, 22, 0x2000); // max_frame_size
     write_u16_le(&mut hd, 24, 22050); // freq
     hd[26] = 1; // channels (mono)
     hd[27] = 16; // bits
@@ -104,6 +107,62 @@ fn build_vqa_with_finf(num_frames: u16) -> Vec<u8> {
     }
 
     buf
+}
+
+/// Builds a VQA file with caller-provided chunks after the VQHD header.
+///
+/// Why: decoder tests need malformed `CBPZ` and `SND1` payloads that still
+/// live inside a structurally valid VQA container.
+fn build_vqa_with_chunks(
+    num_frames: u16,
+    groupsize: u8,
+    audio: Option<(u16, u8, u8)>,
+    chunks: &[([u8; 4], Vec<u8>)],
+) -> Vec<u8> {
+    let mut vqhd = build_vqhd(num_frames);
+    vqhd[13] = groupsize;
+
+    if let Some((freq, channels, bits)) = audio {
+        write_u16_le(&mut vqhd, 24, freq);
+        vqhd[26] = channels;
+        vqhd[27] = bits;
+    } else {
+        write_u16_le(&mut vqhd, 24, 0);
+        vqhd[26] = 0;
+        vqhd[27] = 0;
+    }
+
+    let extra_size: usize = chunks
+        .iter()
+        .map(|(_, payload)| {
+            8usize
+                .saturating_add(payload.len())
+                .saturating_add(payload.len() & 1)
+        })
+        .sum();
+    let form_data_size = 4usize
+        .saturating_add(8usize.saturating_add(vqhd.len()))
+        .saturating_add(extra_size);
+
+    let mut out = Vec::with_capacity(8usize.saturating_add(form_data_size));
+    out.extend_from_slice(b"FORM");
+    out.extend_from_slice(&(form_data_size as u32).to_be_bytes());
+    out.extend_from_slice(b"WVQA");
+
+    out.extend_from_slice(b"VQHD");
+    out.extend_from_slice(&(vqhd.len() as u32).to_be_bytes());
+    out.extend_from_slice(&vqhd);
+
+    for (fourcc, payload) in chunks {
+        out.extend_from_slice(fourcc);
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        if payload.len() & 1 != 0 {
+            out.push(0);
+        }
+    }
+
+    out
 }
 
 // ─── Basic functionality ─────────────────────────────────────────────────────
@@ -281,6 +340,56 @@ fn deterministic() {
     assert_eq!(a, b);
 }
 
+// ─── Decoder strictness ─────────────────────────────────────────────────────
+
+/// `decode_frames()` handles malformed `CBPZ` data without panic.
+///
+/// Why: LCW decompression is tolerant of out-of-range offsets (matching
+/// the original EA engine's pre-zeroed buffer behaviour).  Garbage CBPZ
+/// data may produce wrong pixels but must not panic or crash.
+#[test]
+fn decode_frames_handles_invalid_cbpz_without_panic() {
+    let data = build_vqa_with_chunks(1, 1, None, &[(*b"CBPZ", vec![0x00, 0x00])]);
+    let vqa = VqaFile::parse(&data).unwrap();
+    // May succeed (producing garbage) or error — either is acceptable.
+    // The key invariant is no panic.
+    let _ = vqa.decode_frames();
+}
+
+/// `extract_audio()` rejects a truncated uncompressed `SND1` payload.
+///
+/// Why: SND1 must return an error when the declared payload is shorter than
+/// the raw 8-bit sample count instead of returning partial audio.
+#[test]
+fn extract_audio_rejects_truncated_snd1_uncompressed() {
+    let snd1 = vec![
+        4, 0, // out_size = 4
+        4, 0, // size = 4 (uncompressed)
+        0x80, 0x81, // only 2 payload bytes instead of 4
+    ];
+    let data = build_vqa_with_chunks(1, 1, Some((22050, 1, 8)), &[(*b"SND1", snd1)]);
+    let vqa = VqaFile::parse(&data).unwrap();
+    let err = vqa.extract_audio().unwrap_err();
+    assert!(matches!(err, Error::UnexpectedEof { .. }));
+}
+
+/// `extract_audio()` rejects a compressed `SND1` stream that ends mid-copy.
+///
+/// Why: truncated ADPCM commands must not decode to a shorter sample buffer
+/// without reporting that the compressed payload ran out.
+#[test]
+fn extract_audio_rejects_truncated_snd1_compressed() {
+    let snd1 = vec![
+        2, 0, // out_size = 2
+        1, 0,    // size = 1 (compressed payload)
+        0x80, // code 2 copy command; needs one more byte that is missing
+    ];
+    let data = build_vqa_with_chunks(1, 1, Some((22050, 1, 8)), &[(*b"SND1", snd1)]);
+    let vqa = VqaFile::parse(&data).unwrap();
+    let err = vqa.extract_audio().unwrap_err();
+    assert!(matches!(err, Error::UnexpectedEof { .. }));
+}
+
 // ─── Boundary tests ─────────────────────────────────────────────────────────
 
 /// Zero-frame VQA is accepted (valid but degenerate).
@@ -401,4 +510,91 @@ fn chunk_past_form_boundary_rejected() {
 
     let result = VqaFile::parse(&data);
     assert!(result.is_err(), "chunk past FORM boundary must be rejected");
+}
+
+// ─── Codec correctness ──────────────────────────────────────────────────────
+
+/// CPL0 palette data is scaled from 6-bit VGA (0–63) to 8-bit (0–255)
+/// using the formula `(v6 << 2) | (v6 >> 4)`.
+///
+/// Why: the naive shift `v6 << 2` maps 63 to 252, not 255, leaving a
+/// visible gap at the bright end of the palette.  The correct formula
+/// fills in the low 2 bits from the high 2 bits: `(63 << 2) | (63 >> 4)`
+/// = `252 | 3` = 255.  A wrong formula would cause washed-out or banded
+/// colours in decoded video frames.
+///
+/// How: builds a minimal VQA with a VQFR chunk containing a CPL0 sub-chunk
+/// (palette entries at indices 0 and 1) and a VPT0 sub-chunk (so a frame is
+/// rendered).  After decoding, the palette is inspected for correct scaling
+/// of boundary values 0 and 63.
+#[test]
+fn palette_6bit_to_8bit_scaling() {
+    // Build a VQHD for a single-block video: 4×2 pixels, block_w=4, block_h=2.
+    let mut vqhd = [0u8; 42];
+    write_u16_le(&mut vqhd, 0, 2); // version = 2
+    write_u16_le(&mut vqhd, 4, 1); // num_frames = 1
+    write_u16_le(&mut vqhd, 6, 4); // width = 4
+    write_u16_le(&mut vqhd, 8, 2); // height = 2
+    vqhd[10] = 4; // block_w
+    vqhd[11] = 2; // block_h
+    vqhd[12] = 15; // fps
+    vqhd[13] = 1; // groupsize = 1
+    write_u16_le(&mut vqhd, 16, 1); // cb_entries = 1
+
+    // CPL0: 768-byte palette.  Entry 0 = (0,0,0), entry 1 = (63,63,63).
+    let mut cpl_data = vec![0u8; 768];
+    cpl_data[3] = 63; // entry 1, red
+    cpl_data[4] = 63; // entry 1, green
+    cpl_data[5] = 63; // entry 1, blue
+
+    // CBF0: codebook with 1 entry of block_w × block_h = 8 bytes.
+    let cbf_data = vec![0u8; 8];
+
+    // VPT0: 1 block × 2 (lo + hi halves).  lo=0, hi=0 → codebook block 0.
+    let vpt_data = vec![0u8; 2];
+
+    // Assemble VQFR payload: CPL0 + CBF0 + VPT0 sub-chunks.
+    let mut vqfr_payload = Vec::new();
+    vqfr_payload.extend_from_slice(b"CPL0");
+    vqfr_payload.extend_from_slice(&(cpl_data.len() as u32).to_be_bytes());
+    vqfr_payload.extend_from_slice(&cpl_data);
+    vqfr_payload.extend_from_slice(b"CBF0");
+    vqfr_payload.extend_from_slice(&(cbf_data.len() as u32).to_be_bytes());
+    vqfr_payload.extend_from_slice(&cbf_data);
+    vqfr_payload.extend_from_slice(b"VPT0");
+    vqfr_payload.extend_from_slice(&(vpt_data.len() as u32).to_be_bytes());
+    vqfr_payload.extend_from_slice(&vpt_data);
+
+    // Build full VQA manually (FORM/WVQA + VQHD + VQFR) to use our
+    // custom VQHD dimensions instead of the default 320×200 helper.
+    let vqhd_chunk_size = vqhd.len();
+    let vqfr_chunk_size = vqfr_payload.len();
+    let form_data_size = 4 // "WVQA"
+        + 8 + vqhd_chunk_size  // VQHD chunk
+        + 8 + vqfr_chunk_size; // VQFR chunk
+
+    let mut data = Vec::new();
+    data.extend_from_slice(b"FORM");
+    data.extend_from_slice(&(form_data_size as u32).to_be_bytes());
+    data.extend_from_slice(b"WVQA");
+    data.extend_from_slice(b"VQHD");
+    data.extend_from_slice(&(vqhd_chunk_size as u32).to_be_bytes());
+    data.extend_from_slice(&vqhd);
+    data.extend_from_slice(b"VQFR");
+    data.extend_from_slice(&(vqfr_chunk_size as u32).to_be_bytes());
+    data.extend_from_slice(&vqfr_payload);
+
+    let vqa = VqaFile::parse(&data).unwrap();
+    let frames = vqa.decode_frames().unwrap();
+    assert_eq!(frames.len(), 1, "expected exactly 1 decoded frame");
+
+    let pal = &frames[0].palette;
+    // Entry 0: value 0 → scaled 0.
+    assert_eq!(pal[0], 0, "6-bit 0 must scale to 8-bit 0 (red)");
+    assert_eq!(pal[1], 0, "6-bit 0 must scale to 8-bit 0 (green)");
+    assert_eq!(pal[2], 0, "6-bit 0 must scale to 8-bit 0 (blue)");
+    // Entry 1: value 63 → scaled 255 (not 252).
+    assert_eq!(pal[3], 255, "6-bit 63 must scale to 8-bit 255 (red)");
+    assert_eq!(pal[4], 255, "6-bit 63 must scale to 8-bit 255 (green)");
+    assert_eq!(pal[5], 255, "6-bit 63 must scale to 8-bit 255 (blue)");
 }

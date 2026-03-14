@@ -3,6 +3,23 @@
 > Local implementation rules for the `cnc-formats` crate.
 > Canonical design authority lives in the Iron Curtain design-doc repository.
 
+## Maintaining This File
+
+AGENTS.md is read by stateless agents with no memory of prior sessions.
+Every rule must stand on its own without session context.
+
+- **General, not reactive.** Do not add rules to address a single past
+  mistake.  Only codify patterns that could recur across sessions.
+- **Context-free.** No references to specific conversations, resolved issues,
+  commit hashes, or session artifacts.  A future agent must understand the
+  rule without knowing what prompted it.
+- **Principles over examples.** Prefer abstract guidance.  If an example is
+  needed, make it generic — never name a specific module or function as the
+  motivating case.
+- **No stale specifics.** If a rule names a concrete item (file, function,
+  feature), it must be because the item is structurally important (e.g. the
+  project structure table), not because it was the subject of a past debate.
+
 ## Canonical Design Authority (Do Not Override Locally)
 
 - Design docs repo: `https://github.com/iron-curtain-engine/iron-curtain-design-docs`
@@ -30,6 +47,26 @@ If implementation reveals a missing detail, contradiction, or infeasible design 
 - open a design-gap/design-change request in the design-doc repo
 - mark local work as `implementation placeholder` or `blocked on Pxxx`
 
+### Before Proposing Any Removal or "Why Does This Exist?" — Check D076 First
+
+**Never propose removing a module, binary, public function, feature flag, or
+architectural element without first reading the relevant design doc
+(especially `D076-standalone-crates.md`).**
+
+This crate serves a broader audience than the Iron Curtain engine alone.
+Features that seem unnecessary from an engine perspective may exist because
+D076 explicitly mandates them for the crate's standalone community utility.
+A modder, tool author, or downstream consumer may depend on them.
+
+**Workflow before questioning any existing feature:**
+
+1. Search D076 for the feature name or related keywords.
+2. If D076 mandates it, the feature stays — end of discussion.
+3. If D076 is silent, check `05-FORMATS.md` and `18-PROJECT-TRACKER.md`.
+4. Only if *no* design doc mentions or implies the feature may you raise
+   the question with the maintainer — and even then, do not propose removal
+   without explicit approval.
+
 ### Design Change Escalation Workflow
 
 When a design change is needed:
@@ -50,15 +87,23 @@ Per D076, `cnc-formats` must parse **all** C&C binary formats:
 | `shp`  | `.shp` | Implemented | Keyframe animation variant                            |
 | `pal`  | `.pal` | Implemented | 256-color 6-bit VGA palette                           |
 | `aud`  | `.aud` | Implemented | Westwood IMA ADPCM                                    |
-| `lcw`  | —      | Implemented | LCW decompression (used by SHP/VQA/TMP/WSA)           |
+| `lcw`  | —      | Implemented | LCW decompression (used by SHP/VQA/WSA)               |
 | `tmp`  | `.tmp` | Implemented | TD + RA flat-binary variants (`IControl_Type` layout) |
 | `vqa`  | `.vqa` | Implemented | IFF chunk-based VQ video container                    |
 | `wsa`  | `.wsa` | Implemented | LCW + XOR-delta animation                             |
-| `fnt`  | `.fnt` | Implemented | 256-glyph fixed-height bitmap fonts                   |
+| `fnt`  | `.fnt` | Implemented | Bitmap fonts (variable character count, 4bpp)         |
 
 | `ini`  | `.ini` | Implemented | Classic C&C rules format (always enabled)              |
 | `miniyaml` | MiniYAML | Implemented | OpenRA rules format (behind `miniyaml` feature flag)  |
-| `miniyaml2yaml` | — | Implemented | MiniYAML→YAML converter (behind `miniyaml` feature flag) |
+
+The `cnc-formats` CLI binary provides `validate`, `inspect`, `convert`,
+`list`, and `extract` subcommands.  `validate` and `inspect` work on all
+formats unconditionally; `list` and `extract` operate on archive formats
+(currently MIX); `convert` requires the `convert` and/or `miniyaml` feature
+flags.  With the
+`convert` feature, bidirectional conversions are supported: SHP↔PNG/GIF,
+AUD↔WAV, WSA↔PNG/GIF, TMP↔PNG, PAL↔PNG, FNT→PNG, VQA↔AVI.  With
+the `miniyaml` feature, MiniYAML→YAML conversion is supported.
 
 Text format parsing (`.ini`, MiniYAML) was originally planned as a separate
 `cnc-text-formats` crate but was merged back into `cnc-formats` — `.ini` is as
@@ -130,7 +175,21 @@ microcontroller or in a kernel module.
 
 `cargo deny check licenses` must pass. The `deny.toml` rejects GPL dependencies.
 
-### 5. Parser Security (V38)
+### 5. Prefer Established Crates — Do Not Reinvent
+
+If a well-maintained, popular, pure-Rust crate already provides the needed
+functionality under a permissive license (MIT, Apache-2.0, or dual), **use it**
+instead of writing a custom implementation.  Hand-rolled replacements add
+maintenance burden, miss upstream bug-fixes, and risk subtle correctness issues.
+
+Examples: `base64` for base-64 encoding/decoding, `blowfish` for Blowfish
+encryption, `sha1` for SHA-1 hashing.
+
+Gate optional dependencies behind feature flags when they only apply to a
+specific feature (e.g. `base64` and `blowfish` behind `encrypted-mix`,
+`clap` behind `cli`).
+
+### 6. Parser Security (V38)
 
 All decompressors and format parsers must enforce:
 
@@ -145,6 +204,39 @@ All decompressors and format parsers must enforce:
   `.lcw`) must have a corresponding fuzz target (tracked in `fuzz/`)
 
 These requirements implement V38 from `src/06-SECURITY.md`.
+
+### 7. Git Safety — Read-Only Only
+
+Agents must treat git refs, branches, the index, and the working tree as
+**maintainer-owned state**.  Git usage in this repository is **read-only
+only** unless the maintainer explicitly and unambiguously authorises a
+specific write-side git action.
+
+**Allowed git commands are read-only inspection only**, such as:
+
+- `git status`
+- `git diff`
+- `git log`
+- `git show`
+- `git branch --show-current`
+- `git merge-base`
+- other commands that only inspect repository state and do not modify refs,
+  branches, the index, the working tree, stashes, tags, or remotes
+
+**Forbidden without explicit maintainer approval:** any git command that
+changes repository state, including but not limited to:
+
+- branch changes (`git switch`, `git checkout`, branch create/delete/rename)
+- index mutations (`git add`, `git rm`, `git mv`, `git restore --staged`)
+- history changes (`git commit`, `git merge`, `git rebase`, `git cherry-pick`,
+  `git reset`)
+- stash/shelf operations (`git stash`)
+- remote mutations or sync operations (`git fetch`, `git pull`, `git push`)
+- cleanup or patch-application commands (`git clean`, `git am`, `git apply`)
+- tag creation/deletion
+
+If a task would require a non-read-only git command, stop and ask the
+maintainer to perform it manually or to explicitly relax this rule first.
 
 ## Handling External Feedback & Reviews
 
@@ -231,15 +323,18 @@ src/
   read.rs             — safe binary-read helpers (flat file, internal tests)
   aud/
     mod.rs            — production code (types, constants, parser, decoder)
-    tests.rs          — #[cfg(test)] unit tests
+    tests.rs          — #[cfg(test)] unit tests (header parsing, ADPCM decoder)
+    tests_validation.rs — error, display, determinism, boundary, security tests
   lcw/
     mod.rs            — production code
     tests.rs          — tests
   mix/
     mod.rs            — production code (MixCrc, crc(), MixArchive, parse)
     tests.rs          — tests (includes build_mix helper)
+    tests_validation.rs — error, security, cross-validation, encrypted tests
   mix_crypt/
     mod.rs            — production code (RSA key derivation, Blowfish decrypt)
+    bignum.rs         — minimal big-integer library (extracted from mod.rs)
     tests.rs          — tests
   pal/
     mod.rs            — production code
@@ -252,6 +347,9 @@ src/
     tests.rs          — tests
   vqa/
     mod.rs            — production code (IFF chunk-based VQ video parser)
+    decode.rs         — VQA v2 frame decoder and audio extraction
+    encode.rs         — VQA encoder (frames + audio → VQA binary)
+    snd.rs            — SND audio chunk decoders (SND0, SND1, SND2)
     tests.rs          — tests
   wsa/
     mod.rs            — production code (LCW + XOR-delta animation parser)
@@ -264,10 +362,27 @@ src/
     tests.rs          — tests
   miniyaml/
     mod.rs            — production code (OpenRA MiniYAML parser + to_yaml)
-    tests.rs          — tests
+    tests.rs          — tests (basic functionality, parsing, lookup)
+    tests_validation.rs — to_yaml, error, security, boundary, adversarial tests
+  convert/
+    mod.rs            — shared conversion helpers (indexed↔RGBA, palette I/O)
+    export.rs         — C&C format → common format (SHP→PNG, PAL→PNG, etc.)
+    import.rs         — common format → C&C format (PNG→SHP, WAV→AUD, etc.)
+    tests.rs          — basic conversion round-trip tests
+    tests_validation.rs — AVI/VQA codec, lossless equality tests
+    avi/
+      mod.rs          — AVI constants and re-exports
+      decode.rs       — AVI RIFF reader (decode_avi)
+      encode.rs       — AVI RIFF writer (encode_avi)
   bin/
-    miniyaml2yaml.rs  — CLI converter (MiniYAML → standard YAML)
+    cnc-formats/
+      main.rs         — CLI entry point, validate subcommand, shared helpers
+      inspect.rs      — inspect subcommand
+      convert.rs      — convert subcommand
+      list.rs         — list subcommand (archive inventory)
+      extract.rs      — extract subcommand (archive extraction)
 tests/
+  cli.rs              — CLI integration tests (validate, inspect, convert, list, extract)
   integration.rs      — cross-module integration tests
 ```
 
@@ -289,8 +404,12 @@ tests/
 4. **Test helpers** (e.g. `build_mix`, `build_shp`) live in `tests.rs`, not in
    `mod.rs`.  They are only needed by test code and should not contribute to
    production code context.
-5. **No file should exceed ~600 lines.**  If a production `mod.rs` grows beyond
-   this, split it into focused submodules (e.g. `mix/crc.rs`, `mix/parse.rs`).
+5. **No file should exceed ~600 lines — production or test.**  If a production
+   `mod.rs` grows beyond this, split it into focused submodules (e.g.
+   `mix/crc.rs`, `mix/parse.rs`).  If a `tests.rs` grows beyond this, split
+   it into `tests.rs` + `tests_validation.rs` (or another thematic name).
+   The purpose of the ~600-line cap is LLM context efficiency — it applies
+   equally to every file an agent might load, whether production or test.
    Keep every file small enough for a single LLM context window.
 6. **New format modules** (e.g. `tmp`, `vqa`, `wsa`, `fnt`) must follow this
    directory layout from the start: `src/{format}/mod.rs` + `tests.rs`.
@@ -334,26 +453,54 @@ tests/
 - Never rely on Rust's debug-mode overflow panics as the safety mechanism;
   the code must be correct in release mode.
 
-### Safe Indexing — No Direct `data[offset]` in Production Code
+### Safe Indexing — No Direct Indexing in Production Code
 
-Production code must **never** use direct indexing (`data[offset]`,
-`data[start..end]`) on untrusted input. Direct indexing panics on
-out-of-bounds access, which is a denial-of-service vector for parsers that
-process attacker-controlled data.
+Production code must **never** use direct indexing on **any type** —
+`&[u8]`, `&str`, `Vec<T>`, or any other indexable container.  This applies
+regardless of whether the index "feels safe" (e.g. derived from `.find()`
+or bounded by a loop guard).  Direct indexing panics on out-of-bounds
+access, which is a denial-of-service vector.
 
-**Required pattern:** Use `.get()` with `.ok_or(Error::…)?` for fallible
-access, or the centralised safe-read helpers in `src/read.rs`:
+**Banned patterns (all of these panic on OOB):**
+
+```rust
+data[offset]           // byte slice indexing
+data[start..end]       // byte slice range
+line[pos..]            // string slicing
+content[..colon_pos]   // string slicing with find()-derived index
+entries[i].0           // vec/slice element access
+bytes[i]               // byte array indexing
+value.as_bytes()[0]    // first-byte access
+```
+
+**Required replacements:**
+
+| Banned                | Replacement                                            |
+| --------------------- | ------------------------------------------------------ |
+| `data[offset]`        | `read_u8(data, offset)?` or `data.get(offset)`         |
+| `data[start..end]`    | `data.get(start..end).ok_or(Error::…)?`                |
+| `line[pos..]`         | `line.get(pos..).unwrap_or("")`                        |
+| `&line[..pos]`        | `line.get(..pos).unwrap_or(line)`                      |
+| `entries[i]`          | `entries.get(i).map(…)` or `entries.get_mut(i).map(…)` |
+| `bytes[i]`            | `bytes.get(i) == Some(&val)`                           |
+| `value.as_bytes()[0]` | `value.as_bytes().first()`                             |
+
+**Binary parsers** should use the centralised safe-read helpers in
+`src/read.rs`:
 
 - `read_u8(data, offset)` — reads one byte via `.get()`
 - `read_u16_le(data, offset)` — reads two bytes via `.get()`, little-endian
 - `read_u32_le(data, offset)` — reads four bytes via `.get()`, little-endian
 
 All helpers return `Result<_, Error::UnexpectedEof>` with structured context
-(needed offset, available length). They use `checked_add` internally to prevent
-integer overflow on offset arithmetic.
+(needed offset, available length).  They use `checked_add` internally to
+prevent integer overflow on offset arithmetic.
 
-For slice access, use `data.get(start..end).ok_or(Error::…)?` instead of
-`&data[start..end]`.
+**Text parsers** should use `.get()` with `.unwrap_or("")` (or
+`.unwrap_or(original)` when the fallback is the unsliced source).
+Even though `str::find()` returns valid UTF-8-aligned indices, the rule
+is absolute — no reviewer should ever need to *reason* about whether an
+index is safe.  If it compiles without `.get()`, it's wrong.
 
 **Test code** (`#[cfg(test)]` blocks) may use direct indexing when the test
 controls the input and panic-on-bug is acceptable.
@@ -403,7 +550,7 @@ integer.
 - The crate uses `std`. Use standard library types (`Vec`, `String`, `HashMap`)
   as appropriate.
 - The `&[u8]` parsing API remains the primary interface (callers provide bytes).
-  `std::io::Read`-based streaming APIs are available for large files.
+  Streaming APIs are outside the current public contract for this crate.
 
 ### Heap Allocation Policy
 
@@ -516,6 +663,14 @@ paragraphs:
    (byte encoding, overflow mechanics, manual binary layout).
 
 Omit the "How" paragraph when the test body is self-explanatory.
+
+### Doc Examples Must Compile and Pass
+
+All `///` and `//!` code examples (doctests) must compile, run, and pass.
+Never use `no_run`, `ignore`, or `compile_fail` annotations to skip execution.
+If a code example requires filesystem access, network, or other unavailable
+resources, rewrite it to use in-memory data so it runs in CI without external
+dependencies.
 
 ### Test Organisation
 
@@ -677,6 +832,11 @@ MSRV toolchain is auto-installed via `rustup` if missing.
   - `G1.4` `.aud/.vqa` header validation: **complete**
   - `G1.5` `.tmp/.wsa/.fnt` parsing: **complete**
 - All D076 binary codec modules are implemented
+- Text format modules (`.ini`, MiniYAML) are implemented
+- CLI tool (`cnc-formats` binary) is implemented with `validate`, `inspect`,
+  `convert`, `list`, and `extract` subcommands
+- Goal #8 (`std::io::Read` streaming API) is tracked separately from the
+  current slice-based crate surface
 
 ## Execution Overlay Mapping
 

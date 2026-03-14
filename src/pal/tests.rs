@@ -303,3 +303,86 @@ fn adversarial_trailing_data_ignored() {
     let pal = Palette::parse(&data).unwrap();
     assert_eq!(pal.colors.len(), 256);
 }
+
+/// `Palette::parse` on a sub-valid-size all-zero buffer must not panic.
+///
+/// Why (V38): a zero-length or near-zero buffer exercises the early EOF
+/// path.  The parser must return an error, not panic.
+#[test]
+fn adversarial_all_zero_no_panic() {
+    let data = [0u8; 100];
+    let _ = Palette::parse(&data);
+}
+
+// ── Encoder round-trip tests ─────────────────────────────────────────
+
+/// `encode` produces bytes that `parse` round-trips to an identical palette.
+///
+/// Why: the encoder must emit the same 768-byte format the parser reads.
+/// A mismatch means either the encoder omits/reorders bytes or the parser
+/// misinterprets the encoded output.
+#[test]
+fn encode_round_trip() {
+    let mut data = all_zero_pal();
+    // Set a few known colours to exercise non-zero values.
+    data[0] = 1;
+    data[1] = 2;
+    data[2] = 3;
+    data[128 * 3] = 10;
+    data[128 * 3 + 1] = 20;
+    data[128 * 3 + 2] = 30;
+    data[255 * 3] = 63;
+    data[255 * 3 + 1] = 63;
+    data[255 * 3 + 2] = 63;
+
+    let original = Palette::parse(&data).unwrap();
+    let encoded = original.encode();
+    assert_eq!(encoded.len(), PALETTE_BYTES);
+
+    let reparsed = Palette::parse(&encoded).unwrap();
+    assert_eq!(original, reparsed);
+}
+
+/// `from_rgb8` → `encode` round-trip: 8-bit RGB in, 6-bit VGA bytes out.
+///
+/// Why: `from_rgb8` divides by 4 (`>> 2`) and `encode` writes the 6-bit
+/// values verbatim.  We verify the encoded bytes match the expected
+/// 6-bit representation of the input.
+#[test]
+fn from_rgb8_round_trip() {
+    // Build 768 bytes of 8-bit RGB data with known values.
+    let mut rgb8 = vec![0u8; PALETTE_BYTES];
+    // Color 0: (252, 128, 64) → 6-bit: (63, 32, 16)
+    rgb8[0] = 252;
+    rgb8[1] = 128;
+    rgb8[2] = 64;
+    // Color 255: (0, 4, 8) → 6-bit: (0, 1, 2)
+    rgb8[255 * 3] = 0;
+    rgb8[255 * 3 + 1] = 4;
+    rgb8[255 * 3 + 2] = 8;
+
+    let pal = Palette::from_rgb8(&rgb8).unwrap();
+    let encoded = pal.encode();
+    assert_eq!(encoded.len(), PALETTE_BYTES);
+
+    // Verify expected 6-bit values at color 0.
+    assert_eq!(encoded[0], 63); // 252 >> 2
+    assert_eq!(encoded[1], 32); // 128 >> 2
+    assert_eq!(encoded[2], 16); // 64 >> 2
+
+    // Verify expected 6-bit values at color 255.
+    assert_eq!(encoded[255 * 3], 0); // 0 >> 2
+    assert_eq!(encoded[255 * 3 + 1], 1); // 4 >> 2
+    assert_eq!(encoded[255 * 3 + 2], 2); // 8 >> 2
+}
+
+/// `from_rgb8` with input shorter than 768 bytes returns `UnexpectedEof`.
+///
+/// Why: the function requires exactly 256 RGB triples (768 bytes).  A
+/// short buffer must be rejected to prevent reading uninitialised entries.
+#[test]
+fn from_rgb8_too_short() {
+    let short = vec![0u8; 767];
+    let result = Palette::from_rgb8(&short);
+    assert!(matches!(result, Err(Error::UnexpectedEof { .. })));
+}

@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Copyright (c) 2025–present Iron Curtain contributors
+
+name: Security Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run daily at 06:00 UTC to catch newly published advisories.
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

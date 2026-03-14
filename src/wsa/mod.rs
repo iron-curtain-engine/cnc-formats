@@ -16,9 +16,10 @@
 //! ```
 //!
 //! The extra `+2` offsets: `offsets[0]` is the first frame, `offsets[num_frames]`
-//! acts as a sentinel for the last frame's end, and `offsets[num_frames + 1]`
-//! (if non-zero) points to a "looping delta" that transforms the last frame
-//! back into the first frame for seamless looping.
+//! points to the loop-back delta (XOR delta from the last frame back to
+//! frame 0 for seamless looping — also serves as the end boundary for
+//! frame N−1), and `offsets[num_frames + 1]` is the end-of-data sentinel
+//! (offset past the last byte of frame data).
 //!
 //! ## Decoding
 //!
@@ -57,8 +58,10 @@ const MAX_FRAME_AREA: usize = 4 * 1024 * 1024;
 
 /// Parsed WSA file header.
 ///
-/// The header describes the animation dimensions, frame count, and the
-/// size of the palette (0 if the animation uses an external palette).
+/// The 14-byte header matches EA's `WSA_FileHeaderType` from
+/// `TIBERIANDAWN/WIN32LIB/WSA.CPP`, cross-validated against OpenRA's
+/// `WsaVideo.cs`.  Fields at offset 10-13 are two separate `u16` values
+/// (`largest_frame_size` and `flags`), not one `u32`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WsaHeader {
     /// Number of animation frames.
@@ -71,9 +74,24 @@ pub struct WsaHeader {
     pub width: u16,
     /// Frame height in pixels.
     pub height: u16,
-    /// Size of the delta buffer needed for one frame (usually `width × height`).
-    /// Also called `delta_buffer_size` in some documentation.
-    pub buffer_size: u32,
+    /// Size of the largest compressed frame delta in bytes.
+    /// EA source calls this `LargestFrameSize` (u16, offset 10).
+    pub largest_frame_size: u16,
+    /// Flags field (u16, offset 12).
+    /// Bit 0: embedded palette present (768 bytes of 6-bit VGA palette
+    /// immediately after the offset table).
+    pub flags: u16,
+}
+
+impl WsaHeader {
+    /// Returns `true` if the WSA file has an embedded 768-byte palette.
+    ///
+    /// When set, the palette occupies 768 bytes immediately after the
+    /// frame offset table (before the compressed frame data).
+    #[inline]
+    pub fn has_embedded_palette(&self) -> bool {
+        self.flags & 1 != 0
+    }
 }
 
 // ─── Frame ───────────────────────────────────────────────────────────────────
@@ -104,9 +122,13 @@ pub struct WsaFile<'a> {
     pub header: WsaHeader,
     /// Compressed frame data segments.
     pub frames: Vec<WsaFrame<'a>>,
-    /// True if the file contains a looping delta (the extra offset at
-    /// `offsets[num_frames + 1]` is non-zero).
+    /// True if the file contains a looping delta at `offsets[num_frames]`.
+    /// Determined by checking whether the end-of-data sentinel
+    /// `offsets[num_frames + 1]` is non-zero (indicating data exists
+    /// beyond the last normal frame).
     pub has_loop_frame: bool,
+    /// Embedded 6-bit VGA palette (768 bytes), if `header.flags & 1` is set.
+    pub palette: Option<&'a [u8]>,
 }
 
 impl<'a> WsaFile<'a> {
@@ -130,7 +152,9 @@ impl<'a> WsaFile<'a> {
         let y = read_u16_le(data, 4)?;
         let width = read_u16_le(data, 6)?;
         let height = read_u16_le(data, 8)?;
-        let buffer_size = read_u32_le(data, 10)?;
+        // Offsets 10-11 and 12-13: two separate u16 fields per EA WSA.CPP.
+        let largest_frame_size = read_u16_le(data, 10)?;
+        let flags = read_u16_le(data, 12)?;
 
         // V38: cap frame count.
         if (num_frames as usize) > MAX_FRAME_COUNT {
@@ -157,14 +181,15 @@ impl<'a> WsaFile<'a> {
             y,
             width,
             height,
-            buffer_size,
+            largest_frame_size,
+            flags,
         };
 
         // ── Offset Table ─────────────────────────────────────────────────
         // The offset table has (num_frames + 2) entries:
         //   offsets[0..num_frames]     — frame start offsets
-        //   offsets[num_frames]        — sentinel (end of last frame)
-        //   offsets[num_frames + 1]    — loop delta offset (0 = no loop)
+        //   offsets[num_frames]        — loop-back delta start (also bounds last frame)
+        //   offsets[num_frames + 1]    — end-of-data sentinel (0 = no loop)
         let num_offsets = (num_frames as usize).saturating_add(2);
         let offsets_size = num_offsets.saturating_mul(4);
         let offsets_end = WSA_HEADER_SIZE.saturating_add(offsets_size);
@@ -184,8 +209,32 @@ impl<'a> WsaFile<'a> {
         }
 
         // WSA offsets are relative to the start of the data area (after
-        // the header + offset table).  We compute an absolute base.
-        let data_base = offsets_end;
+        // the header + offset table + optional palette).
+        // If flags bit 0 is set, a 768-byte palette follows the offset table.
+        let palette_size = if header.has_embedded_palette() {
+            768
+        } else {
+            0
+        };
+        let palette_end = offsets_end.saturating_add(palette_size);
+        if palette_size > 0 && palette_end > data.len() {
+            return Err(Error::UnexpectedEof {
+                needed: palette_end,
+                available: data.len(),
+            });
+        }
+        let palette = if palette_size > 0 {
+            Some(
+                data.get(offsets_end..palette_end)
+                    .ok_or(Error::UnexpectedEof {
+                        needed: palette_end,
+                        available: data.len(),
+                    })?,
+            )
+        } else {
+            None
+        };
+        let data_base = palette_end;
 
         // ── Frames ───────────────────────────────────────────────────────
         let fc = num_frames as usize;
@@ -233,8 +282,9 @@ impl<'a> WsaFile<'a> {
             });
         }
 
-        // Check for loop frame: the last offset entry (offsets[num_frames + 1])
-        // is non-zero if the animation loops.
+        // Check for loop frame: per EA WSA.CPP the loop-back delta lives at
+        // offsets[num_frames] and offsets[num_frames + 1] is the end-of-data
+        // sentinel.  A non-zero sentinel means loop delta data exists.
         let loop_offset = offsets.get(fc.saturating_add(1)).copied().unwrap_or(0);
         let has_loop_frame = loop_offset != 0;
 
@@ -242,8 +292,133 @@ impl<'a> WsaFile<'a> {
             header,
             frames,
             has_loop_frame,
+            palette,
         })
     }
+
+    /// Decodes all animation frames into palette-indexed pixel buffers.
+    ///
+    /// WSA frames are LCW-compressed XOR-deltas applied sequentially:
+    /// frame 0 is XOR'd against a zero-filled canvas, each subsequent
+    /// frame is XOR'd against the previous frame's output.
+    ///
+    /// Returns one `Vec<u8>` per frame, each containing `width × height`
+    /// palette-indexed pixels.
+    ///
+    /// # Errors
+    ///
+    /// - Forwards LCW decompression errors for corrupt frame data.
+    pub fn decode_frames(&self) -> Result<Vec<Vec<u8>>, crate::error::Error> {
+        let pixel_count = (self.header.width as usize).saturating_mul(self.header.height as usize);
+        let mut canvas = vec![0u8; pixel_count];
+        let mut decoded = Vec::with_capacity(self.frames.len());
+
+        for frame in &self.frames {
+            if frame.data.is_empty() {
+                // Empty frame: no delta, canvas unchanged.
+                decoded.push(canvas.clone());
+                continue;
+            }
+            let delta = crate::lcw::decompress(frame.data, pixel_count)?;
+            // XOR the delta onto the running canvas.
+            for (dst, src) in canvas.iter_mut().zip(delta.iter()) {
+                *dst ^= *src;
+            }
+            decoded.push(canvas.clone());
+        }
+
+        Ok(decoded)
+    }
+}
+
+// ── WSA Encoder ──────────────────────────────────────────────────────────────
+//
+// Builds a valid WSA binary from palette-indexed pixel frames.  Each frame
+// is XOR-delta'd against the previous frame (or a zero canvas for frame 0),
+// then the delta is LCW-compressed.  This matches the standard WSA decode
+// pipeline in reverse.
+//
+// Clean-room implementation based on the publicly documented WSA layout.
+
+/// Encodes palette-indexed pixel frames into a complete WSA file.
+///
+/// Each frame in `frames` must be exactly `width × height` bytes.  The
+/// encoder computes XOR-deltas between consecutive frames and LCW-compresses
+/// each delta, matching the standard WSA decode pipeline.
+///
+/// Returns the complete WSA file as `Vec<u8>` that [`WsaFile::parse`] can
+/// round-trip.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidSize`] if any frame has the wrong pixel count.
+pub fn encode_frames(frames: &[&[u8]], width: u16, height: u16) -> Result<Vec<u8>, Error> {
+    let pixel_count = (width as usize).saturating_mul(height as usize);
+    for frame in frames {
+        if frame.len() != pixel_count {
+            return Err(Error::InvalidSize {
+                value: frame.len(),
+                limit: pixel_count,
+                context: "WSA frame pixel count mismatch",
+            });
+        }
+    }
+
+    let num_frames = frames.len() as u16;
+    let num_offsets = (num_frames as usize).saturating_add(2);
+    let offsets_size = num_offsets.saturating_mul(4);
+    let header_size = WSA_HEADER_SIZE;
+
+    // Compute XOR-deltas and LCW-compress each frame.
+    let mut prev = vec![0u8; pixel_count]; // zero canvas for frame 0
+    let mut compressed_frames = Vec::with_capacity(frames.len());
+    let mut largest = 0usize;
+
+    for frame in frames {
+        // XOR-delta: diff between current frame and previous.
+        let mut delta = Vec::with_capacity(pixel_count);
+        for (i, &px) in frame.iter().enumerate() {
+            delta.push(px ^ prev.get(i).copied().unwrap_or(0));
+        }
+        let compressed = crate::lcw::compress(&delta);
+        if compressed.len() > largest {
+            largest = compressed.len();
+        }
+        compressed_frames.push(compressed);
+        prev = frame.to_vec();
+    }
+
+    let data_base = header_size + offsets_size; // no embedded palette
+    let total_data: usize = compressed_frames.iter().map(|c| c.len()).sum();
+    let mut out = Vec::with_capacity(data_base + total_data);
+
+    // ── Header (14 bytes) ────────────────────────────────────────────
+    out.extend_from_slice(&num_frames.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes()); // x
+    out.extend_from_slice(&0u16.to_le_bytes()); // y
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out.extend_from_slice(&(largest as u16).to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes()); // flags (no palette)
+
+    // ── Offset table ((num_frames + 2) × u32) ───────────────────────
+    // Offsets are relative to data_base.
+    let mut data_offset = 0u32;
+    for c in &compressed_frames {
+        out.extend_from_slice(&data_offset.to_le_bytes());
+        data_offset = data_offset.saturating_add(c.len() as u32);
+    }
+    // Sentinel: end of last frame.
+    out.extend_from_slice(&data_offset.to_le_bytes());
+    // Loop delta offset: 0 = no loop.
+    out.extend_from_slice(&0u32.to_le_bytes());
+
+    // ── Compressed frame data ────────────────────────────────────────
+    for c in &compressed_frames {
+        out.extend_from_slice(c);
+    }
+
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -215,7 +215,7 @@ impl IniFile {
         for line in text.lines() {
             // Strip comments: everything from the first `;` onward is ignored.
             let line = match line.find(';') {
-                Some(pos) => &line[..pos],
+                Some(pos) => line.get(..pos).unwrap_or(line),
                 None => line,
             };
             let line = line.trim();
@@ -227,7 +227,7 @@ impl IniFile {
             // Section header: [SectionName]
             if line.starts_with('[') {
                 if let Some(end) = line.find(']') {
-                    let name = line[1..end].trim();
+                    let name = line.get(1..end).unwrap_or("").trim();
                     let lower_name = name.to_ascii_lowercase();
 
                     if !file.sections.contains_key(&lower_name) {
@@ -252,8 +252,8 @@ impl IniFile {
             // Key=Value pair (only valid inside a section).
             if let Some(eq_pos) = line.find('=') {
                 if let Some(ref section_key) = current_section {
-                    let key = line[..eq_pos].trim();
-                    let value = line[eq_pos + 1..].trim();
+                    let key = line.get(..eq_pos).unwrap_or("").trim();
+                    let value = line.get(eq_pos.saturating_add(1)..).unwrap_or("").trim();
 
                     if !key.is_empty() {
                         if let Some((_, section)) = file.sections.get_mut(section_key) {

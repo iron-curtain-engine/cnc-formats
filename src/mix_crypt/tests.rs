@@ -10,8 +10,8 @@ use super::*;
 /// Why: if the decoder is broken, key derivation will silently fail.
 #[test]
 fn b64_decode_pubkey_produces_bytes() {
-    let (buf, len) = b64_decode(PUBKEY_STR);
-    let decoded = &buf[..len];
+    use base64::prelude::*;
+    let decoded = BASE64_STANDARD_NO_PAD.decode(PUBKEY_STR).unwrap();
     assert!(!decoded.is_empty(), "decoded pubkey should not be empty");
     // The XCC public key decodes to ~42 bytes (DER tag + 40-byte modulus).
     assert!(
@@ -24,16 +24,18 @@ fn b64_decode_pubkey_produces_bytes() {
 /// Base-64 decoding is deterministic.
 #[test]
 fn b64_decode_deterministic() {
-    let a = b64_decode(PUBKEY_STR);
-    let b = b64_decode(PUBKEY_STR);
-    assert_eq!(a.0[..a.1], b.0[..b.1]);
+    use base64::prelude::*;
+    let a = BASE64_STANDARD_NO_PAD.decode(PUBKEY_STR).unwrap();
+    let b = BASE64_STANDARD_NO_PAD.decode(PUBKEY_STR).unwrap();
+    assert_eq!(a, b);
 }
 
 /// Base-64 encoding of empty input yields empty output.
 #[test]
 fn b64_decode_empty() {
-    let (_, len) = b64_decode(b"");
-    assert_eq!(len, 0);
+    use base64::prelude::*;
+    let decoded = BASE64_STANDARD_NO_PAD.decode("").unwrap();
+    assert_eq!(decoded.len(), 0);
 }
 
 // ── BigNum arithmetic ────────────────────────────────────────────────
@@ -127,7 +129,7 @@ fn bn_mod_exp_with_real_exponent() {
 /// will be wildly different.
 #[test]
 fn pubkey_modulus_has_expected_bitlen() {
-    let pk = init_pubkey();
+    let pk = init_pubkey().unwrap();
     // The Westwood public key is approximately 312-320 bits.
     assert!(
         pk.mod_bitlen >= 300 && pk.mod_bitlen <= 330,
@@ -139,7 +141,7 @@ fn pubkey_modulus_has_expected_bitlen() {
 /// Public key exponent is 0x10001.
 #[test]
 fn pubkey_exponent_is_65537() {
-    let pk = init_pubkey();
+    let pk = init_pubkey().unwrap();
     assert_eq!(pk.exponent[0], 0x10001);
     assert_eq!(bn_len(&pk.exponent), 1);
 }
@@ -231,7 +233,7 @@ fn decrypt_header_short_input_returns_eof() {
 fn decrypt_header_roundtrip() {
     use blowfish::cipher::generic_array::GenericArray;
     use blowfish::cipher::{BlockEncrypt, KeyInit};
-    use blowfish::BlowfishLE;
+    type BlowfishBE = blowfish::Blowfish;
 
     // Build plaintext: FileHeader (6 bytes) + 1 SubBlock (12 bytes) = 18.
     // Layout: count(u16) + data_size(u32) + crc(u32) + offset(u32) + size(u32)
@@ -248,7 +250,7 @@ fn decrypt_header_roundtrip() {
 
     // Encrypt with a known key.
     let key = [0x42u8; BLOWFISH_KEY_LEN];
-    let cipher = BlowfishLE::new_from_slice(&key).unwrap();
+    let cipher = BlowfishBE::new_from_slice(&key).unwrap();
     let mut encrypted = plaintext.clone();
     for chunk in encrypted.chunks_exact_mut(8) {
         cipher.encrypt_block(GenericArray::from_mut_slice(chunk));
@@ -261,29 +263,29 @@ fn decrypt_header_roundtrip() {
     assert_eq!(&decrypted[6..18], &plaintext[6..18], "SubBlock mismatch");
 }
 
-/// decrypt_mix_header: decrypted count > MAX_MIX_ENTRIES → InvalidSize.
+/// decrypt_mix_header: large u16 count (65535) is within the raised cap
+/// but fails with UnexpectedEof (not enough SubBlock data).
 ///
-/// Why (V38): even behind encryption, an unreasonable entry count must
-/// be caught before allocating the SubBlock index.
-///
-/// How: encrypt a first block containing count = 16385, then decrypt it.
+/// Why: after raising MAX_MIX_ENTRIES to 131,072, any u16 count is
+/// accepted by the cap check.  A large count with only 8 bytes of
+/// encrypted data triggers UnexpectedEof when reading the SubBlock index.
 #[test]
-fn decrypt_header_count_exceeds_cap() {
+fn decrypt_header_large_count_eof() {
     use blowfish::cipher::generic_array::GenericArray;
     use blowfish::cipher::{BlockEncrypt, KeyInit};
-    use blowfish::BlowfishLE;
+    type BlowfishBE = blowfish::Blowfish;
 
     let mut block = [0u8; 8];
-    block[0..2].copy_from_slice(&16_385u16.to_le_bytes());
+    block[0..2].copy_from_slice(&u16::MAX.to_le_bytes());
 
     let key = [0xABu8; BLOWFISH_KEY_LEN];
-    let cipher = BlowfishLE::new_from_slice(&key).unwrap();
+    let cipher = BlowfishBE::new_from_slice(&key).unwrap();
     cipher.encrypt_block(GenericArray::from_mut_slice(&mut block));
 
     let err = decrypt_mix_header(&block, &key).unwrap_err();
     assert!(
-        matches!(err, Error::InvalidSize { value: 16385, .. }),
-        "expected InvalidSize with value 16385, got: {err}",
+        matches!(err, Error::UnexpectedEof { .. }),
+        "expected UnexpectedEof for large count with insufficient data, got: {err}",
     );
 }
 
@@ -298,13 +300,13 @@ fn decrypt_header_count_exceeds_cap() {
 fn decrypt_header_truncated_after_first_block() {
     use blowfish::cipher::generic_array::GenericArray;
     use blowfish::cipher::{BlockEncrypt, KeyInit};
-    use blowfish::BlowfishLE;
+    type BlowfishBE = blowfish::Blowfish;
 
     let mut block = [0u8; 8];
     block[0..2].copy_from_slice(&10u16.to_le_bytes());
 
     let key = [0xCDu8; BLOWFISH_KEY_LEN];
-    let cipher = BlowfishLE::new_from_slice(&key).unwrap();
+    let cipher = BlowfishBE::new_from_slice(&key).unwrap();
     cipher.encrypt_block(GenericArray::from_mut_slice(&mut block));
 
     let err = decrypt_mix_header(&block, &key).unwrap_err();
@@ -328,13 +330,13 @@ fn decrypt_header_truncated_after_first_block() {
 fn decrypt_header_deterministic() {
     use blowfish::cipher::generic_array::GenericArray;
     use blowfish::cipher::{BlockEncrypt, KeyInit};
-    use blowfish::BlowfishLE;
+    type BlowfishBE = blowfish::Blowfish;
 
     let mut block = [0u8; 8];
     block[0..2].copy_from_slice(&0u16.to_le_bytes()); // count = 0
 
     let key = [0x55u8; BLOWFISH_KEY_LEN];
-    let cipher = BlowfishLE::new_from_slice(&key).unwrap();
+    let cipher = BlowfishBE::new_from_slice(&key).unwrap();
     cipher.encrypt_block(GenericArray::from_mut_slice(&mut block));
 
     let a = decrypt_mix_header(&block, &key).unwrap();
@@ -394,4 +396,325 @@ fn derive_key_79_bytes_returns_error() {
         }
         other => panic!("Expected UnexpectedEof, got: {other}"),
     }
+}
+
+// ── Security adversarial tests ───────────────────────────────────────
+
+/// `derive_blowfish_key` on 80 bytes of `0xFF` must not panic.
+///
+/// Why (V38): all-ones key_source maximises every byte in the RSA
+/// modular exponentiation path — exercises BigNum overflow guards and
+/// modular reduction with extreme inputs.
+#[test]
+fn adversarial_derive_key_all_ff_no_panic() {
+    let data = [0xFFu8; KEY_SOURCE_LEN];
+    let _ = derive_blowfish_key(&data);
+}
+
+/// `derive_blowfish_key` on 80 bytes of `0x00` must not panic.
+///
+/// Why (V38): all-zero input creates a zero-valued BigNum, exercising
+/// the `0^exponent mod n` path in modular exponentiation.
+#[test]
+fn adversarial_derive_key_all_zero_no_panic() {
+    let data = [0u8; KEY_SOURCE_LEN];
+    let _ = derive_blowfish_key(&data);
+}
+
+/// `decrypt_mix_header` on 8 bytes of `0xFF` with all-FF key must not panic.
+///
+/// Why (V38): exercises Blowfish decryption with extreme ciphertext,
+/// then header parsing with `u16::MAX` entry count and giant body_size.
+#[test]
+fn adversarial_decrypt_header_all_ff_no_panic() {
+    let data = [0xFFu8; 256];
+    let key = [0xFFu8; BLOWFISH_KEY_LEN];
+    let _ = decrypt_mix_header(&data, &key);
+}
+
+/// `decrypt_mix_header` on 8 bytes of `0x00` with all-zero key must not panic.
+///
+/// Why (V38): zero ciphertext and zero key exercises degenerate Blowfish
+/// state and zero entry-count / body-size header paths.
+#[test]
+fn adversarial_decrypt_header_all_zero_no_panic() {
+    let data = [0u8; 256];
+    let key = [0u8; BLOWFISH_KEY_LEN];
+    let _ = decrypt_mix_header(&data, &key);
+}
+
+// ── Integer overflow safety ──────────────────────────────────────────
+
+/// `bn_mul` with all-`u32::MAX` words must not panic or wrap incorrectly.
+///
+/// Why: multiplication of two numbers with maximal words exercises the
+/// widest possible intermediate `u64` products and carry propagation.
+/// Any carry bug would silently corrupt the RSA result.
+///
+/// How: sets the first `len` words of both operands to `u32::MAX`, then
+/// multiplies.  The test asserts no panic — correctness of the product
+/// is covered by `bn_mul_basic`.
+#[test]
+fn overflow_bn_mul_all_max_words_no_panic() {
+    let mut a = bn_zero();
+    let mut b = bn_zero();
+    let len = 10; // 10 words of u32::MAX each
+    for i in 0..len {
+        if let Some(w) = a.get_mut(i) {
+            *w = u32::MAX;
+        }
+        if let Some(w) = b.get_mut(i) {
+            *w = u32::MAX;
+        }
+    }
+    let mut dest = vec![0u32; len * 2 + 1];
+    bn_mul(&mut dest, &a, &b, len);
+    // The product of (2^320 - 1) × (2^320 - 1) is non-zero.
+    assert!(dest.iter().any(|&w| w != 0), "product should be non-zero");
+}
+
+/// `bn_sub` where `a < b` produces a wrapped result and borrow = 1.
+///
+/// Why: the subtraction function must handle borrow propagation correctly
+/// across all 64 words when the result underflows.  A borrow-chain bug
+/// would corrupt the modular reduction in `bn_mod_exp`.
+#[test]
+fn overflow_bn_sub_underflow_borrow() {
+    let a = bn_from_u32(0);
+    let b = bn_from_u32(1);
+    let mut dest = bn_zero();
+    let borrow = bn_sub(&mut dest, &a, &b);
+    // 0 - 1 wraps: every word should be u32::MAX (two's complement).
+    assert_eq!(borrow, 1, "borrow should be 1 when a < b");
+    assert_eq!(
+        dest[0],
+        u32::MAX,
+        "word 0 should be u32::MAX after 0 - 1 wrap"
+    );
+}
+
+/// `bn_sub` with both operands all-`u32::MAX` produces zero with no borrow.
+///
+/// Why: equal-value subtraction with maximal words exercises the
+/// `wrapping_sub` path where every per-word difference is exactly zero
+/// and no borrow propagates.
+#[test]
+fn overflow_bn_sub_max_minus_max_is_zero() {
+    let mut a = bn_zero();
+    let mut b = bn_zero();
+    for i in 0..BN_WORDS {
+        if let Some(w) = a.get_mut(i) {
+            *w = u32::MAX;
+        }
+        if let Some(w) = b.get_mut(i) {
+            *w = u32::MAX;
+        }
+    }
+    let mut dest = bn_zero();
+    let borrow = bn_sub(&mut dest, &a, &b);
+    assert_eq!(borrow, 0, "max - max should have no borrow");
+    assert!(dest.iter().all(|&w| w == 0), "max - max should be zero");
+}
+
+/// `bn_from_be_bytes` with a slice larger than `BN_WORDS * 4` bytes
+/// silently truncates excess high-order bytes via `.get_mut()` guards.
+///
+/// Why: the function must not panic when given oversized input.  Excess
+/// bytes fall outside the 64-word BigNum and are silently dropped by
+/// the `.get_mut()` bounds check.
+#[test]
+fn overflow_bn_from_be_bytes_oversized_input_no_panic() {
+    // BN_WORDS * 4 = 256 bytes.  Provide 512 bytes.
+    let data = vec![0xABu8; 512];
+    let n = bn_from_be_bytes(&data);
+    // The low 256 bytes survive; excess is silently dropped.
+    assert!(
+        bn_len(&n) > 0,
+        "should have non-zero words from the retained bytes"
+    );
+}
+
+/// `bn_from_le_bytes` with a slice larger than `BN_WORDS * 4` bytes
+/// silently truncates high-order bytes.
+///
+/// Why: same rationale as the big-endian variant — must not panic.
+#[test]
+fn overflow_bn_from_le_bytes_oversized_input_no_panic() {
+    let data = vec![0xCDu8; 512];
+    let n = bn_from_le_bytes(&data);
+    assert!(
+        bn_len(&n) > 0,
+        "should have non-zero words from the retained bytes"
+    );
+}
+
+/// `bn_mod_exp` with a zero modulus returns zero without division by zero.
+///
+/// Why: `bn_mod_reduce` divides by the modulus.  A zero modulus must not
+/// cause a panic from division or infinite loop.
+#[test]
+fn overflow_bn_mod_exp_zero_modulus_no_panic() {
+    let base = bn_from_u32(2);
+    let exp = bn_from_u32(10);
+    let modulus = bn_zero();
+    let result = bn_mod_exp(&base, &exp, &modulus);
+    // Zero modulus → zero result (early return in bn_mod_exp).
+    assert!(
+        result.iter().all(|&w| w == 0),
+        "zero modulus should give zero result"
+    );
+}
+
+// ── RSA known-vector tests ──────────────────────────────────────────
+
+/// `bn_mod_exp` with the Westwood public key produces a known result.
+///
+/// Why: the encrypted MIX decryption pipeline depends on RSA modular
+/// exponentiation producing exactly the right bytes.  This test uses a
+/// Python-computed reference vector (`42^0x10001 mod n`) to verify our
+/// BigNum arithmetic against an independent implementation.
+///
+/// How: the Westwood modulus is loaded from its known hex representation,
+/// exponent is 0x10001, base is 42.  The expected result was computed
+/// with Python's built-in `pow(42, 0x10001, n)`.
+#[test]
+fn bn_mod_exp_known_vector_westwood_key() {
+    // Westwood modulus (40 bytes, big-endian hex).
+    let mod_be = hex_to_bytes(
+        "51bcda086d39fce4565160d651713fa2e8aa54fa6682b04aabdd0e6af8b0c1e6d1fb4f3daa437f15",
+    );
+    let modulus = bn_from_be_bytes(&mod_be);
+    let exp = bn_from_u32(0x10001);
+    let base = bn_from_u32(42);
+
+    let result = bn_mod_exp(&base, &exp, &modulus);
+
+    // Expected result: 42^0x10001 mod n, as LE bytes (from Python).
+    let expected_le = hex_to_bytes(
+        "55d63d95814b8a71ec19789ca7489362c2e425568fec72fa5112de248ba34d15996c7c45ee5ef148",
+    );
+    let mut actual_le = vec![0u8; expected_le.len()];
+    bn_to_le_bytes(&result, &mut actual_le);
+
+    assert_eq!(
+        actual_le,
+        expected_le,
+        "42^0x10001 mod n mismatch.\n  actual:   {}\n  expected: {}",
+        bytes_to_hex(&actual_le),
+        bytes_to_hex(&expected_le),
+    );
+}
+
+/// Full key derivation with a non-trivial keysource produces a known result.
+///
+/// Why: the all-zero keysource round-trip test is self-consistent but
+/// can't catch bugs where both chunks produce the same wrong result
+/// (e.g. chunk ordering errors).  This test uses a SHA-256-derived
+/// keysource and verifies against a Python-computed reference.
+#[test]
+fn derive_key_known_vector() {
+    // Build a deterministic non-trivial 80-byte keysource.
+    // SHA-256("cnc-formats-test-keysource") = 32 bytes; repeat + pad to 80.
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(b"cnc-formats-test-keysource");
+    let mut ks = [0u8; 80];
+    ks[..32].copy_from_slice(&hash);
+    ks[32..64].copy_from_slice(&hash);
+    ks[64..80].copy_from_slice(&hash[..16]);
+
+    // Derive the key — this must not panic.
+    let key = derive_blowfish_key(&ks).unwrap();
+
+    // Expected key computed with Python:
+    //   chunk1 = int.from_bytes(ks[0:40], 'little')
+    //   chunk2 = int.from_bytes(ks[40:80], 'little')
+    //   r1 = pow(chunk1, 0x10001, n).to_bytes(40, 'little')[:39]
+    //   r2 = pow(chunk2, 0x10001, n).to_bytes(40, 'little')[:39]
+    //   key = (r1 + r2)[:56]
+    let expected = hex_to_bytes(
+        "7f578c161987d9df1d22ee15d72f9fe35680bab2ce2e7c7ba068fbb4dd9a5c1c396a3e0f2a526fb73770c90ce81bf2ffe72cac5b87fa7444",
+    );
+    assert_eq!(
+        key.as_slice(),
+        expected.as_slice(),
+        "derived key mismatch.\n  actual:   {}\n  expected: {}",
+        bytes_to_hex(&key),
+        bytes_to_hex(&expected),
+    );
+}
+
+/// Decrypted header from REDALERT.MIX keysource produces a plausible count.
+///
+/// Why: the RSA + Blowfish pipeline may be mathematically correct in
+/// isolation but produce garbage when applied to real game data if there's
+/// a subtle byte-ordering or padding mismatch.  This test uses the actual
+/// keysource bytes from RA1's REDALERT.MIX (a 24-byte public constant,
+/// not game content) and verifies that decryption produces a count
+/// between 1 and 65535.
+#[test]
+fn decrypt_real_redalert_mix_header() {
+    let key_source: [u8; 80] = [
+        0x04, 0x70, 0x41, 0xE4, 0xBB, 0x12, 0x9B, 0x19, 0x7E, 0xFB, 0x40, 0x86, 0xDD, 0x97, 0x4D,
+        0x11, 0x14, 0x98, 0x81, 0x0B, 0xDE, 0xCE, 0xD3, 0x6B, 0xEB, 0x6B, 0xFB, 0xFB, 0x4F, 0x4B,
+        0xB0, 0x13, 0x92, 0x0F, 0xD8, 0x38, 0xF0, 0xE4, 0x43, 0x45, 0xA0, 0x5C, 0x21, 0xED, 0xF2,
+        0x4B, 0xF6, 0xF3, 0x78, 0x26, 0xF0, 0x65, 0x8F, 0xC6, 0x45, 0x59, 0x1F, 0xC8, 0x90, 0x17,
+        0x16, 0x64, 0x4A, 0xAE, 0xB5, 0xDE, 0xD9, 0x2A, 0x2E, 0xE2, 0x92, 0xCA, 0x7D, 0x0D, 0x3A,
+        0xEA, 0xDF, 0x45, 0xD7, 0x27,
+    ];
+    // First 3 encrypted blocks (24 bytes) from REDALERT.MIX offset 84.
+    let encrypted_start: [u8; 24] = [
+        0x3B, 0xA7, 0xD6, 0xA0, 0x94, 0x9D, 0x5E, 0xE5, 0x1C, 0x6C, 0x4C, 0x72, 0x8C, 0x4D, 0x34,
+        0x2D, 0x34, 0x71, 0x41, 0x16, 0x16, 0x0F, 0x3C, 0x2B,
+    ];
+
+    let bf_key = derive_blowfish_key(&key_source).unwrap();
+    eprintln!("BF key: {}", bytes_to_hex(&bf_key));
+
+    // Decrypt the first block to check the count.
+    use blowfish::cipher::generic_array::GenericArray;
+    use blowfish::cipher::{BlockDecrypt, KeyInit};
+    type BlowfishBE = blowfish::Blowfish;
+
+    let cipher = BlowfishBE::new_from_slice(&bf_key).unwrap();
+    let mut block = [0u8; 8];
+    block.copy_from_slice(&encrypted_start[..8]);
+    cipher.decrypt_block(GenericArray::from_mut_slice(&mut block));
+    eprintln!("Decrypted first block: {}", bytes_to_hex(&block));
+
+    let count = u16::from_le_bytes([block[0], block[1]]);
+    let data_size = u32::from_le_bytes([block[2], block[3], block[4], block[5]]);
+    eprintln!("count={count}, data_size={data_size}");
+
+    // REDALERT.MIX is ~25 MB. A plausible count is 100-10000 entries.
+    // data_size + header overhead should roughly equal file size (25,046,328).
+    let file_size: usize = 25_046_328;
+    let header_overhead = 4 + 80 + (6 + count as usize * 12).div_ceil(8) * 8;
+    let expected_size = header_overhead + data_size as usize;
+
+    eprintln!(
+        "header_overhead={header_overhead}, expected_size={expected_size}, file_size={file_size}"
+    );
+
+    assert!(
+        count > 0 && count < 10000,
+        "count {count} is implausible for REDALERT.MIX (expected ~100-5000 entries)"
+    );
+    // Allow 20 bytes tolerance for SHA-1 digest.
+    assert!(
+        expected_size <= file_size + 20 && expected_size >= file_size.saturating_sub(20),
+        "expected_size {expected_size} doesn't match file_size {file_size}"
+    );
+}
+
+/// Helper: convert hex string to bytes.
+fn hex_to_bytes(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+/// Helper: convert bytes to hex string.
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

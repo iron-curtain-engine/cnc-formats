@@ -11,11 +11,14 @@
 //! ```text
 //! # This is a comment
 //! RootNode:
-//!     ChildKey: ChildValue
-//!     AnotherChild:
-//!         GrandChild: DeepValue
+//!     ChildKey: ChildValue          (indented by one tab)
+//!     AnotherChild:                 (indented by one tab)
+//!         GrandChild: DeepValue     (indented by two tabs)
 //! Inherits: @parent
 //! ```
+//!
+//! Note: indentation shown as spaces for readability; actual MiniYAML files
+//! use **tab characters** exclusively.  The parser rejects space indentation.
 //!
 //! ## Key differences from standard YAML
 //!
@@ -32,9 +35,9 @@
 //!
 //! ## Known Limitations
 //!
-//! - **Mixed indentation:** OpenRA's C# parser accepts both tabs and spaces
+//! - **Tab-only indentation:** OpenRA's C# parser accepts both tabs and spaces
 //!   (treating 4 spaces ≈ 1 tab).  This parser is tab-only.  Files that use
-//!   space indentation will parse incorrectly.
+//!   space indentation are rejected with an error.
 //! - **Guarded whitespace:** OpenRA uses leading/trailing `\` to preserve
 //!   significant whitespace in values.  This is not currently implemented.
 //!
@@ -166,12 +169,28 @@ impl MiniYamlDoc {
             // Strip comments: everything from the first unescaped `#` onward.
             // MiniYAML uses `\#` as an escape for literal `#` in values.
             let line = match find_unescaped_hash(line) {
-                Some(pos) => &line[..pos],
+                Some(pos) => line.get(..pos).unwrap_or(line),
                 None => line,
             };
 
             // Count leading tabs (indentation level).
             let indent = line.bytes().take_while(|&b| b == b'\t').count();
+
+            let content = line.get(indent..).unwrap_or("").trim();
+            if content.is_empty() {
+                continue;
+            }
+
+            // Reject space indentation — MiniYAML uses tabs only.
+            // Space-indented content would be silently misparsed (all lines
+            // treated as depth 0) which is worse than a clear error.
+            // Only checked on lines with non-empty content — blank lines
+            // consisting solely of whitespace are harmless and skipped above.
+            if indent == 0 && line.starts_with(' ') {
+                return Err(Error::InvalidMagic {
+                    context: "MiniYAML: space indentation detected (use tabs)",
+                });
+            }
 
             // V38: reject excessive nesting.
             if indent >= MAX_DEPTH {
@@ -180,11 +199,6 @@ impl MiniYamlDoc {
                     limit: MAX_DEPTH,
                     context: "MiniYAML nesting depth",
                 });
-            }
-
-            let content = line[indent..].trim();
-            if content.is_empty() {
-                continue;
             }
 
             // V38: bound total node count.
@@ -199,8 +213,8 @@ impl MiniYamlDoc {
             // Parse `Key: Value` or bare `Key:` or `Key` (no colon).
             // After comment stripping, unescape `\#` → `#` in values.
             let (key, value) = if let Some(colon_pos) = content.find(':') {
-                let k = content[..colon_pos].trim();
-                let v = content[colon_pos + 1..].trim();
+                let k = content.get(..colon_pos).unwrap_or("").trim();
+                let v = content.get(colon_pos + 1..).unwrap_or("").trim();
                 if v.is_empty() {
                     (k.to_string(), None)
                 } else {
@@ -239,7 +253,9 @@ impl MiniYamlDoc {
 /// Returns the position of the first `#` not immediately preceded by `\`.
 fn find_unescaped_hash(line: &str) -> Option<usize> {
     let bytes = line.as_bytes();
-    (0..bytes.len()).find(|&i| bytes[i] == b'#' && (i == 0 || bytes[i - 1] != b'\\'))
+    (0..bytes.len()).find(|&i| {
+        bytes.get(i) == Some(&b'#') && (i == 0 || bytes.get(i.wrapping_sub(1)) != Some(&b'\\'))
+    })
 }
 
 /// Unescapes `\#` → `#` in a MiniYAML value string.
@@ -277,7 +293,7 @@ fn build_tree(
     let mut i = start;
 
     while i < end {
-        let indent = entries[i].0;
+        let indent = entries.get(i).map_or(0, |e| e.0);
 
         // Skip entries at deeper indentation than expected (orphaned children
         // of a skipped parent — shouldn't happen in well-formed input, but
@@ -295,7 +311,11 @@ fn build_tree(
         // Find the range of children (entries at indent + 1 immediately following).
         let child_start = i + 1;
         let mut child_end = child_start;
-        while child_end < end && entries[child_end].0 > expected_indent {
+        while child_end < end
+            && entries
+                .get(child_end)
+                .is_some_and(|e| e.0 > expected_indent)
+        {
             child_end += 1;
         }
 
@@ -306,8 +326,11 @@ fn build_tree(
         };
 
         // Move strings out of the entry instead of cloning — zero extra allocs.
-        let key = std::mem::take(&mut entries[i].1);
-        let value = std::mem::take(&mut entries[i].2);
+        // Safety: `i < end <= entries.len()` is maintained by the while-loop guard.
+        let (key, value) = entries
+            .get_mut(i)
+            .map(|e| (std::mem::take(&mut e.1), std::mem::take(&mut e.2)))
+            .unwrap_or_default();
 
         nodes.push(MiniYamlNode {
             key,
@@ -399,7 +422,10 @@ fn needs_yaml_quoting(value: &str) -> bool {
     }
 
     // Values starting with YAML-special characters.
-    let first = value.as_bytes()[0];
+    let first = match value.as_bytes().first() {
+        Some(&b) => b,
+        None => return true,
+    };
     if matches!(
         first,
         b'@' | b'^'
@@ -443,3 +469,5 @@ fn needs_yaml_quoting(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_validation;

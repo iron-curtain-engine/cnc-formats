@@ -30,3 +30,7 @@ Cargo.lock
 *~
 .DS_Store
 Thumbs.db
+
+# Real game file samples (not redistributable)
+samples/*
+!samples/README.md

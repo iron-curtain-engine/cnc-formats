@@ -482,3 +482,64 @@ fn adversarial_long_line_no_panic() {
     let ini = IniFile::parse_str(&input).unwrap();
     assert_eq!(ini.get("S", "Key").unwrap().len(), 1_000_000);
 }
+
+// ── Integer overflow safety ──────────────────────────────────────────
+
+/// `saturating_add(1)` in the section-count error path reports the correct
+/// value when the count is exactly at `MAX_SECTIONS`.
+///
+/// Why: the error variant uses `sections.len().saturating_add(1)` to report
+/// the attempted count.  At the cap boundary this must not wrap (it can't
+/// because `MAX_SECTIONS` is far below `usize::MAX`, but the test documents
+/// the invariant and catches regressions).
+///
+/// How: builds an input with exactly `MAX_SECTIONS + 1` unique sections.
+/// The parser should reject the last section with `InvalidSize`.
+#[test]
+fn overflow_section_count_saturating_add_reports_correct_value() {
+    let mut input = String::new();
+    for i in 0..=MAX_SECTIONS {
+        input.push_str(&format!("[S{i}]\n"));
+    }
+    let err = IniFile::parse_str(&input).unwrap_err();
+    match err {
+        Error::InvalidSize {
+            value,
+            limit,
+            context,
+        } => {
+            assert_eq!(value, MAX_SECTIONS + 1);
+            assert_eq!(limit, MAX_SECTIONS);
+            assert!(context.contains("section"), "context: {context}");
+        }
+        other => panic!("Expected InvalidSize, got: {other}"),
+    }
+}
+
+/// `saturating_add(1)` in the key-count error path reports the correct
+/// value when the count is exactly at `MAX_KEYS_PER_SECTION`.
+///
+/// Why: same rationale as the section-count test — documents that the
+/// error payload is accurate at the rejection boundary.
+///
+/// How: builds one section with `MAX_KEYS_PER_SECTION + 1` unique keys.
+#[test]
+fn overflow_key_count_saturating_add_reports_correct_value() {
+    let mut input = String::from("[S]\n");
+    for i in 0..=MAX_KEYS_PER_SECTION {
+        input.push_str(&format!("K{i}=V\n"));
+    }
+    let err = IniFile::parse_str(&input).unwrap_err();
+    match err {
+        Error::InvalidSize {
+            value,
+            limit,
+            context,
+        } => {
+            assert_eq!(value, MAX_KEYS_PER_SECTION + 1);
+            assert_eq!(limit, MAX_KEYS_PER_SECTION);
+            assert!(context.contains("key"), "context: {context}");
+        }
+        other => panic!("Expected InvalidSize, got: {other}"),
+    }
+}

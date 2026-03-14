@@ -4,10 +4,14 @@
 //! Integration tests — cross-module workflows that exercise the full parsing
 //! pipeline, not just individual format parsers in isolation.
 
+#[cfg(feature = "adl")]
+use cnc_formats::adl::AdlFile;
 use cnc_formats::aud::{self, AudFile, AUD_FLAG_16BIT, SCOMP_WESTWOOD};
 use cnc_formats::fnt::FntFile;
 use cnc_formats::ini::IniFile;
 use cnc_formats::lcw;
+#[cfg(feature = "midi")]
+use cnc_formats::mid::MidFile;
 #[cfg(feature = "miniyaml")]
 use cnc_formats::miniyaml::MiniYamlDoc;
 use cnc_formats::mix::{self, MixArchive};
@@ -16,6 +20,8 @@ use cnc_formats::shp::ShpFile;
 use cnc_formats::tmp;
 use cnc_formats::vqa::VqaFile;
 use cnc_formats::wsa::WsaFile;
+#[cfg(feature = "xmi")]
+use cnc_formats::xmi::XmiFile;
 use cnc_formats::Error;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -32,14 +38,15 @@ fn build_aud_bytes(compressed: &[u8]) -> Vec<u8> {
     v
 }
 
-/// Build a minimal 1-frame uncompressed SHP file.
-fn build_shp_bytes(width: u16, height: u16, pixels: &[u8]) -> Vec<u8> {
+/// Build a minimal 1-frame LCW SHP file using the canonical 8-byte offset
+/// table format (frame_count + 2 entries × 8 bytes each).
+fn build_shp_bytes(width: u16, height: u16, lcw_data: &[u8]) -> Vec<u8> {
     let frame_count: u16 = 1;
-    let largest = pixels.len() as u16;
+    let largest = lcw_data.len() as u16;
     let flags: u16 = 0;
-
-    let offset_table_size = (frame_count as usize + 1) * 4;
-    let data_start = 14 + offset_table_size;
+    let total_entries = frame_count as usize + 2; // frame + EOF + zero-padding
+    let offset_table_size = total_entries * 8;
+    let data_start = (14 + offset_table_size) as u32;
 
     let mut out = Vec::new();
     // Header: 7 × u16
@@ -50,38 +57,22 @@ fn build_shp_bytes(width: u16, height: u16, pixels: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&height.to_le_bytes());
     out.extend_from_slice(&largest.to_le_bytes());
     out.extend_from_slice(&flags.to_le_bytes());
-    // Offset table: 2 entries with OFFSET_UNCOMPRESSED_FLAG (0x8000_0000)
-    let off0 = data_start as u32 | 0x8000_0000;
-    let off1 = (data_start + pixels.len()) as u32 | 0x8000_0000;
-    out.extend_from_slice(&off0.to_le_bytes());
-    out.extend_from_slice(&off1.to_le_bytes());
-    // Frame data
-    out.extend_from_slice(pixels);
-    out
-}
-
-/// Build a 1-frame SHP with an LCW-compressed frame (no uncompressed flag).
-fn build_shp_compressed_bytes(width: u16, height: u16, lcw_data: &[u8]) -> Vec<u8> {
-    let frame_count: u16 = 1;
-    let largest = lcw_data.len() as u16;
-    let flags: u16 = 0;
-
-    let offset_table_size = (frame_count as usize + 1) * 4;
-    let data_start = 14 + offset_table_size;
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&frame_count.to_le_bytes());
+    // Offset table: 3 × 8-byte entries (frame 0, EOF, zero-padding).
+    // Frame 0: LCW format (0x80) in high byte, file offset in low 24 bits.
+    let raw0 = (0x80u32 << 24) | (data_start & 0x00FF_FFFF);
+    out.extend_from_slice(&raw0.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes()); // ref_offset
+    out.extend_from_slice(&0u16.to_le_bytes()); // ref_format
+                                                // EOF sentinel: file offset = end of frame data.
+    let raw_eof = (data_start + lcw_data.len() as u32) & 0x00FF_FFFF;
+    out.extend_from_slice(&raw_eof.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&width.to_le_bytes());
-    out.extend_from_slice(&height.to_le_bytes());
-    out.extend_from_slice(&largest.to_le_bytes());
-    out.extend_from_slice(&flags.to_le_bytes());
-    // Offsets WITHOUT uncompressed flag → LCW-compressed
-    let off0 = data_start as u32;
-    let off1 = (data_start + lcw_data.len()) as u32;
-    out.extend_from_slice(&off0.to_le_bytes());
-    out.extend_from_slice(&off1.to_le_bytes());
+    // Zero-padding entry.
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    // Frame data.
     out.extend_from_slice(lcw_data);
     out
 }
@@ -126,8 +117,9 @@ fn build_mix_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
 /// round-trip and produce the same frame data.
 #[test]
 fn mix_extract_then_parse_shp() {
-    let pixels: Vec<u8> = (0u8..16).collect();
-    let shp_bytes = build_shp_bytes(4, 4, &pixels);
+    // LCW fill: 16 bytes of 0xAA + end marker.
+    let lcw_data: Vec<u8> = vec![0xFE, 0x10, 0x00, 0xAA, 0x80];
+    let shp_bytes = build_shp_bytes(4, 4, &lcw_data);
     let mix_bytes = build_mix_bytes(&[("UNIT.SHP", &shp_bytes)]);
 
     let archive = MixArchive::parse(&mix_bytes).unwrap();
@@ -139,7 +131,7 @@ fn mix_extract_then_parse_shp() {
     assert_eq!(shp.frame_count(), 1);
     assert_eq!(shp.header.width, 4);
     assert_eq!(shp.header.height, 4);
-    assert_eq!(shp.frames[0].data, pixels);
+    assert_eq!(shp.frames[0].data, lcw_data.as_slice());
 }
 
 /// MIX archive → extract PAL → parse palette and convert to 8-bit RGB.
@@ -195,11 +187,10 @@ fn mix_extract_then_parse_and_decode_aud() {
 fn shp_lcw_decompress_pipeline() {
     // LCW stream: long fill 16 bytes of 0xAB, then end marker
     let lcw_data: Vec<u8> = vec![0xFE, 0x10, 0x00, 0xAB, 0x80];
-    let shp_bytes = build_shp_compressed_bytes(4, 4, &lcw_data);
+    let shp_bytes = build_shp_bytes(4, 4, &lcw_data);
     let shp = ShpFile::parse(&shp_bytes).unwrap();
 
     assert_eq!(shp.frame_count(), 1);
-    assert!(!shp.frames[0].is_uncompressed);
 
     let pixels = shp.frames[0].pixels(16).unwrap();
     assert_eq!(pixels, vec![0xABu8; 16]);
@@ -247,8 +238,8 @@ fn aud_parse_decode_deterministic() {
 /// from the same archive without cross-contamination.
 #[test]
 fn mix_multi_file_type_archive() {
-    let pixels: Vec<u8> = vec![0u8; 4];
-    let shp_bytes = build_shp_bytes(2, 2, &pixels);
+    let lcw_data: Vec<u8> = vec![0xFE, 0x04, 0x00, 0x00, 0x80]; // fill 4 bytes of 0x00
+    let shp_bytes = build_shp_bytes(2, 2, &lcw_data);
     let pal_bytes = vec![0u8; PALETTE_BYTES];
     let compressed = vec![0x00u8; 5];
     let aud_bytes = build_aud_bytes(&compressed);
@@ -272,10 +263,9 @@ fn mix_multi_file_type_archive() {
 
 /// `Error::CrcMismatch` Display output contains hex-formatted CRC values.
 ///
-/// Why: the `CrcMismatch` variant is defined in `error.rs` for future use
-/// (e.g. MIX checksum validation).  Its Display impl must render the
-/// expected/found values in `0x{:08X}` format so callers can diagnose
-/// which CRC was wrong.  Testing it now prevents silent regressions.
+/// Why: callers can surface `CrcMismatch` directly in diagnostics, so its
+/// Display impl must render the expected/found values in `0x{:08X}` format.
+/// Testing it here prevents silent formatting regressions.
 #[test]
 fn crc_mismatch_display_contains_hex_values() {
     let err = Error::CrcMismatch {
@@ -360,7 +350,7 @@ fn wsa_parse_minimal_valid() {
     let height: u16 = 48;
     let num_offsets = (num_frames as usize) + 2;
     let offsets_size = num_offsets * 4;
-    let header_plus_offsets = 14 + offsets_size;
+    let _header_plus_offsets = 14 + offsets_size;
 
     let mut data = Vec::new();
     data.extend_from_slice(&num_frames.to_le_bytes());
@@ -368,10 +358,12 @@ fn wsa_parse_minimal_valid() {
     data.extend_from_slice(&0u16.to_le_bytes()); // y
     data.extend_from_slice(&width.to_le_bytes());
     data.extend_from_slice(&height.to_le_bytes());
-    data.extend_from_slice(&0u32.to_le_bytes()); // delta_buffer_size
-                                                 // Offsets: both point to end (sentinel pattern for 0 frames)
+    data.extend_from_slice(&0u16.to_le_bytes()); // largest_frame_size
+    data.extend_from_slice(&0u16.to_le_bytes()); // flags (no palette)
+                                                 // Offsets: both 0 (sentinel pattern for 0 frames).
+                                                 // Offsets are relative to data area, not file start.
     for _ in 0..num_offsets {
-        data.extend_from_slice(&(header_plus_offsets as u32).to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
     }
 
     let wsa = WsaFile::parse(&data).unwrap();
@@ -383,38 +375,60 @@ fn wsa_parse_minimal_valid() {
 /// FNT: parse a well-formed minimal FNT file and verify glyph count.
 ///
 /// Why: integration-level confidence that `FntFile::parse` works
-/// end-to-end with a 256-glyph font.
+/// end-to-end with the canonical 20-byte block-offset header format.
 #[test]
 fn fnt_parse_minimal_valid() {
-    // Minimal FNT: height=8, all glyphs width=1 (1 byte each)
-    let height: u8 = 8;
-    let glyph_w: u16 = 1;
-    let bytes_per_col = 1usize; // ceil(8/8) = 1
-    let glyph_size = (glyph_w as usize) * bytes_per_col;
+    // Minimal FNT: max_height=8, num_chars=256, only glyph 0 has width=2.
+    let num_chars: u16 = 256;
+    let nc = num_chars as usize;
+    let glyph_w: u8 = 2;
+    let data_rows: u8 = 8;
+    // 4bpp: ceil(2/2) = 1 byte per row, 8 rows = 8 bytes.
+    let glyph_size = data_rows as usize;
 
-    let mut data = Vec::new();
-    // Header: 6 bytes — data_size(u16), height(u8), max_width(u8), unknown(u16)
-    let data_size = (256 * glyph_size) as u16;
-    data.extend_from_slice(&data_size.to_le_bytes()); // data_size
-    data.push(height); // height (u8 at offset 2)
-    data.push(glyph_w as u8); // max_width (u8 at offset 3)
-    data.extend_from_slice(&0u16.to_le_bytes()); // unknown
+    // Block layout after 20-byte header.
+    let offset_table_start = 20usize;
+    let width_table_start = offset_table_start + nc * 2;
+    let height_table_start = width_table_start + nc;
+    let data_area_start = height_table_start + nc * 2;
+    let total = data_area_start + glyph_size;
 
-    // Width table: 256 × u16, all = glyph_w
-    for _ in 0..256 {
-        data.extend_from_slice(&glyph_w.to_le_bytes());
+    let mut data = vec![0u8; total];
+    // Header.
+    data[0..2].copy_from_slice(&(total as u16).to_le_bytes()); // FontLength
+    data[2] = 0; // compress
+    data[3] = 5; // data_blocks
+    data[4..6].copy_from_slice(&0x0010u16.to_le_bytes()); // InfoBlockOffset
+    data[6..8].copy_from_slice(&(offset_table_start as u16).to_le_bytes());
+    data[8..10].copy_from_slice(&(width_table_start as u16).to_le_bytes());
+    data[10..12].copy_from_slice(&(data_area_start as u16).to_le_bytes());
+    data[12..14].copy_from_slice(&(height_table_start as u16).to_le_bytes());
+    data[14..16].copy_from_slice(&0x1012u16.to_le_bytes()); // UnknownConst
+    data[16] = 0; // pad
+    data[17] = (num_chars - 1) as u8; // CharCount
+    data[18] = 8; // MaxHeight
+    data[19] = glyph_w; // MaxWidth
+
+    // Width table: glyph 0 = 2, rest = 0.
+    data[width_table_start] = glyph_w;
+
+    // Height table: glyph 0 → y_offset=0, data_rows=8.
+    data[height_table_start..height_table_start + 2]
+        .copy_from_slice(&((data_rows as u16) << 8).to_le_bytes());
+
+    // Offset table: glyph 0 → data_area_start.
+    data[offset_table_start..offset_table_start + 2]
+        .copy_from_slice(&(data_area_start as u16).to_le_bytes());
+
+    // Glyph data: fill with 0xAA.
+    for b in data[data_area_start..].iter_mut() {
+        *b = 0xAA;
     }
-    // Offset table: 256 × u16, sequential offsets
-    for i in 0..256u16 {
-        let off = (i as usize) * glyph_size;
-        data.extend_from_slice(&(off as u16).to_le_bytes());
-    }
-    // Glyph data: 256 × 1 byte each
-    data.extend_from_slice(&vec![0xAAu8; 256 * glyph_size]);
 
     let fnt = FntFile::parse(&data).unwrap();
     assert_eq!(fnt.glyphs.len(), 256);
-    assert_eq!(fnt.header.height, 8);
+    assert_eq!(fnt.header.max_height, 8);
+    assert_eq!(fnt.header.num_chars, 256);
 }
 
 /// TMP (TD): parse a well-formed minimal terrain tile file.
@@ -423,63 +437,104 @@ fn fnt_parse_minimal_valid() {
 /// end-to-end with a 1×1 grid, single 24×24 tile.
 #[test]
 fn tmp_td_parse_minimal_valid() {
-    // TD TMP header layout (20 bytes):
+    // TD TMP: IControl_Type header (32 bytes) + map data + tile data.
     // width(u16), height(u16), tile_count(u16), allocated(u16),
-    // tile_w(u16), tile_h(u16), file_size(u32), image_start(u32)
+    // tile_w(u16), tile_h(u16), file_size(u32), image_start(u32),
+    // + 4 more u32 fields (palettes, remaps, trans_flag, color_map)
     //
     // width/height = grid dimensions (1×1), tile_w/tile_h = 24×24
-    let grid_w: u16 = 1;
-    let grid_h: u16 = 1;
-    let tile_w: u16 = 24;
-    let tile_h: u16 = 24;
-    let tile_count: u16 = 1;
-    let grid_size = (grid_w as usize) * (grid_h as usize); // 1 byte icon map
-    let tile_area = (tile_w as usize) * (tile_h as usize); // 576 bytes
-    let map_end = 20 + grid_size; // 21
-    let total = map_end + tile_area; // 597
+    // Single 24×24 tile with map_offset and icons_offset pointing to
+    // inline data right after the header.
+    let icon_w: u16 = 24;
+    let icon_h: u16 = 24;
+    let count: u16 = 1;
+    let tile_area = (icon_w as usize) * (icon_h as usize); // 576 bytes
+    let map_start: u32 = 32; // right after header
+    let icons_start: u32 = 33; // right after 1-byte map
+    let total = icons_start as usize + tile_area; // 609
 
     let mut data = vec![0u8; total];
-    // Header fields
-    data[0] = grid_w as u8;
-    data[1] = (grid_w >> 8) as u8;
-    data[2] = grid_h as u8;
-    data[3] = (grid_h >> 8) as u8;
-    data[4] = tile_count as u8;
-    data[5] = (tile_count >> 8) as u8;
-    data[6] = 0; // allocated
-    data[7] = 0;
-    data[8] = tile_w as u8;
-    data[9] = (tile_w >> 8) as u8;
-    data[10] = tile_h as u8;
-    data[11] = (tile_h >> 8) as u8;
-    let fs = total as u32;
-    data[12] = (fs & 0xFF) as u8;
-    data[13] = ((fs >> 8) & 0xFF) as u8;
-    data[14] = ((fs >> 16) & 0xFF) as u8;
-    data[15] = ((fs >> 24) & 0xFF) as u8;
-    // image_start = 0 → tiles follow icon map immediately
-    // Icon map at offset 20: single byte = 0 (tile index)
+    // IControl_Type header (32 bytes).
+    data[0..2].copy_from_slice(&icon_w.to_le_bytes()); // icon_width
+    data[2..4].copy_from_slice(&icon_h.to_le_bytes()); // icon_height
+    data[4..6].copy_from_slice(&count.to_le_bytes()); // count
+    data[6..8].copy_from_slice(&count.to_le_bytes()); // allocated
+    data[8..12].copy_from_slice(&(total as u32).to_le_bytes()); // size
+    data[12..16].copy_from_slice(&icons_start.to_le_bytes()); // icons_offset
+    data[28..32].copy_from_slice(&map_start.to_le_bytes()); // map_offset
+
+    // Map data at offset 32: single byte = 0 (tile index).
+    // Tile pixel data starting at offset 33 (already zeroed).
 
     let td = tmp::TdTmpFile::parse(&data).unwrap();
     assert_eq!(td.tiles.len(), 1);
-    assert_eq!(td.header.tile_w, 24);
+    assert_eq!(td.header.icon_width, 24);
 }
 
-/// Adversarial: all new-module parsers on all-`0xFF` input must not panic.
+/// Adversarial: every public parser on all-`0xFF` input must not panic.
 ///
 /// Why (V38): each parser must handle worst-case inputs (maximised header
 /// fields, offset overflow, huge declared sizes) without panic or OOM.
 /// This is the integration-level counterpart of per-module adversarial
-/// tests — it confirms the public API surface is safe.
+/// tests — it confirms the **entire** public API surface is safe in a
+/// single test function.
 #[test]
-fn all_new_parsers_adversarial_all_ff() {
+fn all_parsers_adversarial_all_ff() {
     let data = vec![0xFFu8; 512];
+    // Binary format parsers
+    let _ = MixArchive::parse(&data);
+    let _ = ShpFile::parse(&data);
+    let _ = Palette::parse(&data);
+    let _ = AudFile::parse(&data);
+    let _ = lcw::decompress(&data, 512);
     let _ = VqaFile::parse(&data);
     let _ = WsaFile::parse(&data);
     let _ = FntFile::parse(&data);
     let _ = tmp::TdTmpFile::parse(&data);
     let _ = tmp::RaTmpFile::parse(&data);
+    // Text format parsers
     let _ = IniFile::parse(&data);
+    #[cfg(feature = "miniyaml")]
+    let _ = MiniYamlDoc::parse(&data);
+    // Feature-gated music format parsers
+    #[cfg(feature = "adl")]
+    let _ = AdlFile::parse(&data);
+    #[cfg(feature = "midi")]
+    let _ = MidFile::parse(&data);
+    #[cfg(feature = "xmi")]
+    let _ = XmiFile::parse(&data);
+}
+
+/// Adversarial: every public parser on all-`0x00` input must not panic.
+///
+/// Why (V38): zero-filled input exercises zero-dimension paths, zero-count
+/// loops, division-by-zero guards, and degenerate empty-payload handling.
+/// This is the all-zero counterpart of `all_parsers_adversarial_all_ff`.
+#[test]
+fn all_parsers_adversarial_all_zero() {
+    let data = vec![0x00u8; 512];
+    // Binary format parsers
+    let _ = MixArchive::parse(&data);
+    let _ = ShpFile::parse(&data);
+    let _ = Palette::parse(&data);
+    let _ = AudFile::parse(&data);
+    let _ = lcw::decompress(&data, 512);
+    let _ = VqaFile::parse(&data);
+    let _ = WsaFile::parse(&data);
+    let _ = FntFile::parse(&data);
+    let _ = tmp::TdTmpFile::parse(&data);
+    let _ = tmp::RaTmpFile::parse(&data);
+    // Text format parsers
+    let _ = IniFile::parse(&data);
+    #[cfg(feature = "miniyaml")]
+    let _ = MiniYamlDoc::parse(&data);
+    // Feature-gated music format parsers
+    #[cfg(feature = "adl")]
+    let _ = AdlFile::parse(&data);
+    #[cfg(feature = "midi")]
+    let _ = MidFile::parse(&data);
+    #[cfg(feature = "xmi")]
+    let _ = XmiFile::parse(&data);
 }
 
 // ── Text format integration tests ────────────────────────────────────────────

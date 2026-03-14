@@ -39,6 +39,12 @@
 use crate::error::Error;
 use crate::read::{read_u16_le, read_u32_le, read_u8};
 
+mod decode;
+mod encode;
+mod snd;
+pub use decode::{VqaAudio, VqaFrame};
+pub use encode::{encode_vqa, VqaAudioInput, VqaEncodeParams};
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 /// FourCC for the outer IFF container: "FORM".
@@ -72,12 +78,14 @@ const MAX_CHUNK_SIZE: u32 = 256 * 1024 * 1024;
 /// Parsed VQA file header (VQHD chunk).
 ///
 /// This is the 42-byte structure inside the VQHD chunk that describes the
-/// video's core properties.
+/// video's core properties.  Field layout matches the canonical EA
+/// `VQAHeader` struct from `VQ/INCLUDE/VQA32/VQAFILE.H` (CnC_Red_Alert
+/// repo), cross-validated against OpenRA's `VqaVideo.cs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VqaHeader {
     /// VQA format version (typically 2 for RA, 3 for TS).
     pub version: u16,
-    /// Video flags.
+    /// Video flags.  Bit 0 = has audio, Bit 1 = has alt audio.
     pub flags: u16,
     /// Number of video frames.
     pub num_frames: u16,
@@ -87,16 +95,20 @@ pub struct VqaHeader {
     pub height: u16,
     /// VQ block width (pixels per codebook block, typically 4).
     pub block_w: u8,
-    /// VQ block height (pixels per codebook block, typically 2).
+    /// VQ block height (pixels per codebook block, typically 2 or 4).
     pub block_h: u8,
-    /// Number of codebook update parts per frame (CBParts in Anisimovsky spec).
-    pub cb_parts: u8,
-    /// Total codebook entries (CBentries in Anisimovsky spec).
+    /// Frames per second (typically 15).
+    pub fps: u8,
+    /// VQ codebook group size (frames per partial codebook update cycle).
+    pub groupsize: u8,
+    /// Number of 1-color blocks.
+    pub num_1_colors: u16,
+    /// Total codebook entries.
     pub cb_entries: u16,
-    /// Horizontal display offset (used for centering).
-    pub x_offset: u16,
-    /// Vertical display offset (used for centering).
-    pub y_offset: u16,
+    /// Horizontal display position (0xFFFF = center).
+    pub x_pos: u16,
+    /// Vertical display position (0xFFFF = center).
+    pub y_pos: u16,
     /// Maximum frame data size in bytes (used for buffer pre-allocation).
     pub max_frame_size: u16,
     // ── Audio fields ──
@@ -107,8 +119,10 @@ pub struct VqaHeader {
     /// Audio bits per sample (8 or 16).
     pub bits: u8,
     // ── Extended fields ──
-    /// Four reserved/unknown bytes at end of VQHD (version-dependent).
-    pub reserved: [u8; 4],
+    /// Remaining 14 bytes of the VQHD (alt audio stream + reserved).
+    /// Bytes 28–31: AltSampleRate(u16), AltChannels(u8), AltBitsPerSample(u8).
+    /// Bytes 32–41: FutureUse (5 × u16, version-dependent).
+    pub reserved: [u8; 14],
 }
 
 impl VqaHeader {
@@ -150,9 +164,11 @@ pub struct VqaChunk<'a> {
 pub struct VqaFile<'a> {
     /// The VQHD header.
     pub header: VqaHeader,
-    /// Frame byte offsets from the FINF chunk (each value is the raw u16
-    /// from the file, multiplied by 2 to get the actual byte offset from
-    /// the start of the FORM data).  `None` if no FINF chunk was found.
+    /// Raw frame-info entries from the FINF chunk.  Each `u32` is stored
+    /// as-is from the file: bits 31–28 carry per-frame flags (KEY, PAL,
+    /// SYNC) and bits 27–0 encode the file offset in WORDs — callers must
+    /// multiply by 2 to get the actual byte offset from the start of the
+    /// FORM data.  `None` if no FINF chunk was found.
     pub frame_index: Option<Vec<u32>>,
     /// All chunks in file order (including VQHD and FINF if present).
     pub chunks: Vec<VqaChunk<'a>>,
@@ -324,21 +340,23 @@ fn parse_vqhd(data: &[u8]) -> Result<VqaHeader, Error> {
     let height = read_u16_le(data, 8)?;
     let block_w = read_u8(data, 10)?;
     let block_h = read_u8(data, 11)?;
-    let cb_parts = read_u8(data, 12)?;
-    // byte 13: padding/reserved (aligns cb_entries to u16 boundary)
-    let cb_entries = read_u16_le(data, 14)?;
-    let x_offset = read_u16_le(data, 16)?;
-    let y_offset = read_u16_le(data, 18)?;
-    let max_frame_size = read_u16_le(data, 20)?;
-    // bytes 22-23: unknown/reserved field, not used by container parser
+    // Offset 12–23: field order matches EA VQAFILE.H VQAHeader.
+    let fps = read_u8(data, 12)?;
+    let groupsize = read_u8(data, 13)?;
+    let num_1_colors = read_u16_le(data, 14)?;
+    let cb_entries = read_u16_le(data, 16)?;
+    let x_pos = read_u16_le(data, 18)?;
+    let y_pos = read_u16_le(data, 20)?;
+    let max_frame_size = read_u16_le(data, 22)?;
+    // Offset 24–27: primary audio stream.
     let freq = read_u16_le(data, 24)?;
     let channels = read_u8(data, 26)?;
     let bits = read_u8(data, 27)?;
 
-    // The last 4 bytes of the 42-byte VQHD are version-dependent reserved
-    // fields.  We store them opaquely for round-trip fidelity.
-    let mut reserved = [0u8; 4];
-    let res_slice = data.get(38..42).ok_or(Error::UnexpectedEof {
+    // Bytes 28–41: alt audio stream + FutureUse.  Stored opaquely
+    // for round-trip fidelity — callers can decode if needed.
+    let mut reserved = [0u8; 14];
+    let res_slice = data.get(28..42).ok_or(Error::UnexpectedEof {
         needed: 42,
         available: data.len(),
     })?;
@@ -361,10 +379,12 @@ fn parse_vqhd(data: &[u8]) -> Result<VqaHeader, Error> {
         height,
         block_w,
         block_h,
-        cb_parts,
+        fps,
+        groupsize,
+        num_1_colors,
         cb_entries,
-        x_offset,
-        y_offset,
+        x_pos,
+        y_pos,
         max_frame_size,
         freq,
         channels,

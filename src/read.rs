@@ -118,6 +118,19 @@ mod tests {
         assert_eq!(read_u16_le(&[0x34, 0x12], 0).unwrap(), 0x1234);
     }
 
+    /// Reading u16 from an empty slice returns UnexpectedEof.
+    #[test]
+    fn read_u16_empty() {
+        let err = read_u16_le(&[], 0).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::UnexpectedEof {
+                needed: 2,
+                available: 0
+            }
+        ));
+    }
+
     /// Reading u16 when only 1 byte remains returns UnexpectedEof.
     #[test]
     fn read_u16_one_byte_short() {
@@ -160,6 +173,19 @@ mod tests {
             read_u32_le(&[0x78, 0x56, 0x34, 0x12], 0).unwrap(),
             0x12345678
         );
+    }
+
+    /// Reading u32 from an empty slice returns UnexpectedEof.
+    #[test]
+    fn read_u32_empty() {
+        let err = read_u32_le(&[], 0).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::UnexpectedEof {
+                needed: 4,
+                available: 0
+            }
+        ));
     }
 
     /// Reading u32 when only 3 bytes remain returns UnexpectedEof.

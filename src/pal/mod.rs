@@ -103,10 +103,10 @@ impl Palette {
                 needed: base + 3,
                 available: data.len(),
             })?;
-            // Safe: .get() above guarantees exactly 3 bytes in `triple`.
-            color.r = triple[0];
-            color.g = triple[1];
-            color.b = triple[2];
+            // Safe via .get(): triple is a 3-byte slice from .get(base..base+3).
+            color.r = triple.first().copied().unwrap_or(0);
+            color.g = triple.get(1).copied().unwrap_or(0);
+            color.b = triple.get(2).copied().unwrap_or(0);
         }
         Ok(Palette { colors })
     }
@@ -119,9 +119,54 @@ impl Palette {
     pub fn to_rgb8_array(&self) -> [[u8; 3]; PALETTE_SIZE] {
         let mut out = [[0u8; 3]; PALETTE_SIZE];
         for (i, c) in self.colors.iter().enumerate() {
-            out[i] = c.to_rgb8();
+            if let Some(slot) = out.get_mut(i) {
+                *slot = c.to_rgb8();
+            }
         }
         out
+    }
+    /// Encodes this palette back into the raw 768-byte VGA PAL format.
+    ///
+    /// The output is a valid `.pal` file that [`Palette::parse`] can
+    /// round-trip.  Each R/G/B component is written in the original 6-bit
+    /// VGA range (0–63).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(PALETTE_BYTES);
+        for c in &self.colors {
+            out.push(c.r);
+            out.push(c.g);
+            out.push(c.b);
+        }
+        out
+    }
+
+    /// Creates a palette from 8-bit RGB data (256 × 3 bytes, range 0–255).
+    ///
+    /// Converts from modern 8-bit range to 6-bit VGA range by shifting right
+    /// 2 bits (`value >> 2`).  This is the inverse of [`PalColor::to_rgb8`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnexpectedEof`] if `rgb8` is shorter than 768 bytes.
+    pub fn from_rgb8(rgb8: &[u8]) -> Result<Self, Error> {
+        if rgb8.len() < PALETTE_BYTES {
+            return Err(Error::UnexpectedEof {
+                needed: PALETTE_BYTES,
+                available: rgb8.len(),
+            });
+        }
+        let mut colors = [PalColor { r: 0, g: 0, b: 0 }; PALETTE_SIZE];
+        for (i, color) in colors.iter_mut().enumerate() {
+            let base = i * 3;
+            let triple = rgb8.get(base..base + 3).ok_or(Error::UnexpectedEof {
+                needed: base + 3,
+                available: rgb8.len(),
+            })?;
+            color.r = triple.first().copied().unwrap_or(0) >> 2;
+            color.g = triple.get(1).copied().unwrap_or(0) >> 2;
+            color.b = triple.get(2).copied().unwrap_or(0) >> 2;
+        }
+        Ok(Palette { colors })
     }
 }
 

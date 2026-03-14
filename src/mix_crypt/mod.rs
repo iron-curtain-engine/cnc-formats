@@ -48,8 +48,9 @@ use crate::read::{read_u16_le, read_u8};
 /// Base-64 encoded RSA public key modulus used by Westwood's MIX encryption.
 ///
 /// Source: XCC Utilities (Olaf van der Spek, 2000).  This string decodes to a
-/// ~40 byte (320-bit) big-integer modulus.
-const PUBKEY_STR: &[u8] = b"AihRvNoIbTn85FZRYNZRcT+i6KpU+maCsEqr3Q5q+LDB5tH7Tz2qQ38V";
+/// ~40 byte (320-bit) big-integer modulus.  Uses standard RFC 4648 base64
+/// encoding (no padding).
+const PUBKEY_STR: &str = "AihRvNoIbTn85FZRYNZRcT+i6KpU+maCsEqr3Q5q+LDB5tH7Tz2qQ38V";
 
 /// RSA public exponent (0x10001 = 65537), the standard Fermat prime F4.
 const PUBLIC_EXPONENT: u32 = 0x10001;
@@ -60,357 +61,19 @@ pub(crate) const KEY_SOURCE_LEN: usize = 80;
 /// Size of the derived Blowfish key (bytes).
 const BLOWFISH_KEY_LEN: usize = 56;
 
-// ─── Base-64 Decoding ────────────────────────────────────────────────────────
-
-/// Maps ASCII characters to 6-bit values for the Westwood base-64 alphabet.
-///
-/// Standard base-64: A-Z=0..25, a-z=26..51, 0-9=52..61, +=62, /=63.
-/// Returns 0xFF for invalid characters.
-const fn b64_val(c: u8) -> u8 {
-    match c {
-        b'A'..=b'Z' => c - b'A',
-        b'a'..=b'z' => c - b'a' + 26,
-        b'0'..=b'9' => c - b'0' + 52,
-        b'+' => 62,
-        b'/' => 63,
-        _ => 0xFF,
-    }
-}
-
-/// Maximum base-64 decoded output size.  The Westwood key is 57 chars;
-/// `ceil(57 / 4) * 3 = 45` bytes.  We use 48 for alignment headroom.
-const B64_MAX_OUT: usize = 48;
-
-/// Decodes a base-64 string into a stack buffer.
-///
-/// Returns `(buffer, length)` where `length` is the number of valid bytes.
-/// Processes 4 characters at a time, producing 3 bytes per group.
-/// Trailing partial groups (2 or 3 chars) produce 1 or 2 bytes respectively.
-///
-/// Uses a fixed-size stack buffer to avoid heap allocation.
-fn b64_decode(input: &[u8]) -> ([u8; B64_MAX_OUT], usize) {
-    let mut out = [0u8; B64_MAX_OUT];
-    let mut len = 0usize;
-    // Process full 4-character groups using .get() for safe access.
-    let mut i = 0;
-    while i + 3 < input.len() {
-        // Safe: loop condition guarantees i+3 < input.len().
-        let a = b64_val(*input.get(i).unwrap_or(&0)) as u32;
-        let b = b64_val(*input.get(i + 1).unwrap_or(&0)) as u32;
-        let c = b64_val(*input.get(i + 2).unwrap_or(&0)) as u32;
-        let d = b64_val(*input.get(i + 3).unwrap_or(&0)) as u32;
-        let triple = (a << 18) | (b << 12) | (c << 6) | d;
-        if len < B64_MAX_OUT {
-            out[len] = (triple >> 16) as u8;
-            len += 1;
-        }
-        if len < B64_MAX_OUT {
-            out[len] = (triple >> 8) as u8;
-            len += 1;
-        }
-        if len < B64_MAX_OUT {
-            out[len] = triple as u8;
-            len += 1;
-        }
-        i += 4;
-    }
-    // Handle trailing 2 or 3 characters.
-    let remaining = input.len() - i;
-    if remaining == 3 {
-        let a = b64_val(*input.get(i).unwrap_or(&0)) as u32;
-        let b = b64_val(*input.get(i + 1).unwrap_or(&0)) as u32;
-        let c = b64_val(*input.get(i + 2).unwrap_or(&0)) as u32;
-        let triple = (a << 18) | (b << 12) | (c << 6);
-        if len < B64_MAX_OUT {
-            out[len] = (triple >> 16) as u8;
-            len += 1;
-        }
-        if len < B64_MAX_OUT {
-            out[len] = (triple >> 8) as u8;
-            len += 1;
-        }
-    } else if remaining == 2 {
-        let a = b64_val(*input.get(i).unwrap_or(&0)) as u32;
-        let b = b64_val(*input.get(i + 1).unwrap_or(&0)) as u32;
-        let triple = (a << 18) | (b << 12);
-        if len < B64_MAX_OUT {
-            out[len] = (triple >> 16) as u8;
-            len += 1;
-        }
-    }
-    (out, len)
-}
-
 // ─── Big-Integer Arithmetic ──────────────────────────────────────────────────
 //
-// Minimal big-integer library for RSA modular exponentiation.  Numbers are
-// stored as little-endian arrays of u32 words.  The fixed size (`BN_WORDS`)
-// is large enough for the 320-bit Westwood public key.
+// Extracted into `bignum.rs` — a self-contained minimal big-integer library
+// for RSA modular exponentiation.  Kept in a separate file to stay under the
+// ~600-line LLM context budget.
 
-/// Number of u32 words in our big-integer representation.
-///
-/// 64 words × 4 bytes = 256 bytes = 2048 bits — more than enough for the
-/// 320-bit Westwood RSA key.  This matches the XCC Utilities implementation.
-const BN_WORDS: usize = 64;
-
-/// Double-width buffer size for multiplication results: `BN_WORDS * 2 + 1`.
-///
-/// Used as a stack-allocated scratch buffer in `bn_mod_exp` and
-/// `bn_mod_reduce`, avoiding heap allocation in the inner RSA loop.
-const BN_DOUBLE: usize = BN_WORDS * 2 + 1;
-
-/// A fixed-size big-integer stored as `BN_WORDS` little-endian `u32` words.
-type BigNum = [u32; BN_WORDS];
-
-/// Returns a zeroed big-integer.
-const fn bn_zero() -> BigNum {
-    [0u32; BN_WORDS]
-}
-
-/// Creates a big-integer from a single `u32` value.
-fn bn_from_u32(val: u32) -> BigNum {
-    let mut n = bn_zero();
-    n[0] = val;
-    n
-}
-
-/// Returns the effective length (number of significant words, min 0).
-fn bn_len(n: &BigNum) -> usize {
-    let mut i = BN_WORDS;
-    while i > 0 && n[i - 1] == 0 {
-        i -= 1;
-    }
-    i
-}
-
-/// Returns the bit length of the big-integer (0 for zero).
-fn bn_bitlen(n: &BigNum) -> usize {
-    let len = bn_len(n);
-    if len == 0 {
-        return 0;
-    }
-    let top = n[len - 1];
-    // 32 - leading_zeros gives the position of the highest set bit.
-    len * 32 - top.leading_zeros() as usize
-}
-
-/// Loads a big-endian byte slice into a little-endian BigNum.
-///
-/// The XCC key_to_bignum function loads a DER-like key.  Our version is
-/// simpler: it takes raw big-endian bytes and distributes them into the
-/// little-endian word array.
-fn bn_from_be_bytes(bytes: &[u8]) -> BigNum {
-    let mut n = bn_zero();
-    // Process bytes from least significant to most significant.
-    for (i, &b) in bytes.iter().rev().enumerate() {
-        let word_idx = i / 4;
-        let byte_idx = i % 4;
-        if word_idx < BN_WORDS {
-            n[word_idx] |= (b as u32) << (byte_idx * 8);
-        }
-    }
-    n
-}
-
-/// Loads a little-endian byte slice into a BigNum.
-///
-/// Used to load key_source chunks which are stored in little-endian order
-/// in the MIX file (matching the XCC implementation's memmove into bignum).
-fn bn_from_le_bytes(bytes: &[u8]) -> BigNum {
-    let mut n = bn_zero();
-    for (i, &b) in bytes.iter().enumerate() {
-        let word_idx = i / 4;
-        let byte_idx = i % 4;
-        if word_idx < BN_WORDS {
-            n[word_idx] |= (b as u32) << (byte_idx * 8);
-        }
-    }
-    n
-}
-
-/// Writes the low `count` bytes of a BigNum in little-endian order into `out`.
-///
-/// The caller provides a pre-allocated buffer.  Only `count` bytes are
-/// written (where `count = out.len()`).  This avoids heap allocation.
-fn bn_to_le_bytes(n: &BigNum, out: &mut [u8]) {
-    for (i, byte) in out.iter_mut().enumerate() {
-        let word_idx = i / 4;
-        let byte_idx = i % 4;
-        *byte = if word_idx < BN_WORDS {
-            (n[word_idx] >> (byte_idx * 8)) as u8
-        } else {
-            0
-        };
-    }
-}
-
-/// Compares two big-integers.  Returns -1, 0, or 1.
-fn bn_cmp(a: &BigNum, b: &BigNum) -> i32 {
-    let mut i = BN_WORDS;
-    while i > 0 {
-        i -= 1;
-        if a[i] < b[i] {
-            return -1;
-        }
-        if a[i] > b[i] {
-            return 1;
-        }
-    }
-    0
-}
-
-/// Subtracts `b` from `a`, storing result in `dest`.  Returns the borrow bit.
-///
-/// All operands are treated as unsigned.  If `a < b` the result wraps and
-/// borrow = 1.
-fn bn_sub(dest: &mut BigNum, a: &BigNum, b: &BigNum) -> u32 {
-    let mut borrow: u64 = 0;
-    for i in 0..BN_WORDS {
-        let diff = (a[i] as u64).wrapping_sub(b[i] as u64).wrapping_sub(borrow);
-        dest[i] = diff as u32;
-        // If the subtraction underflowed, carry a borrow.
-        borrow = if diff > u32::MAX as u64 { 1 } else { 0 };
-    }
-    borrow as u32
-}
-
-/// Multiplies two big-integers, storing the double-width result in `dest`.
-///
-/// `dest` must be at least `2 * BN_WORDS` words, but we use the same
-/// `BigNum` type and only multiply numbers whose effective length fits.
-/// This uses the schoolbook O(n²) algorithm, which is fine for 320-bit keys.
-fn bn_mul(dest: &mut [u32], a: &BigNum, b: &BigNum, len: usize) {
-    // Zero the destination (2*len words).
-    for w in dest.iter_mut().take(len * 2) {
-        *w = 0;
-    }
-    for i in 0..len {
-        let mut carry: u64 = 0;
-        for j in 0..len {
-            let prod = (a[i] as u64) * (b[j] as u64) + dest[i + j] as u64 + carry;
-            dest[i + j] = prod as u32;
-            carry = prod >> 32;
-        }
-        if i + len < dest.len() {
-            dest[i + len] = carry as u32;
-        }
-    }
-}
-
-/// Computes `base^exp mod modulus` using square-and-multiply.
-///
-/// This is the core RSA operation.  For the Westwood key, `exp = 0x10001`
-/// and `modulus` is a 320-bit number, so performance is not a concern
-/// (only ~17 squarings and 2 multiplications needed for exponent 65537).
-fn bn_mod_exp(base: &BigNum, exp: &BigNum, modulus: &BigNum) -> BigNum {
-    let mod_len = bn_len(modulus);
-    if mod_len == 0 {
-        return bn_zero();
-    }
-    let exp_bits = bn_bitlen(exp);
-    if exp_bits == 0 {
-        // x^0 = 1 (for any non-zero modulus)
-        return bn_from_u32(1);
-    }
-
-    // Start with result = base mod modulus.
-    let mut result = *base;
-    // Stack-allocated scratch buffer for double-width multiplication results.
-    // BN_DOUBLE = 129 words = 516 bytes — trivial for the stack.
-    let mut tmp_buf = [0u32; BN_DOUBLE];
-
-    // Square-and-multiply from the second-highest bit down to bit 0.
-    for bit_pos in (0..exp_bits - 1).rev() {
-        let word_idx = bit_pos / 32;
-        let bit_idx = bit_pos % 32;
-
-        // Square: result = result * result mod modulus
-        bn_mul(&mut tmp_buf, &result, &result, mod_len);
-        result = bn_mod_reduce(&tmp_buf, modulus, mod_len);
-
-        // Multiply if bit is set: result = result * base mod modulus
-        if (exp[word_idx] >> bit_idx) & 1 == 1 {
-            bn_mul(&mut tmp_buf, &result, base, mod_len);
-            result = bn_mod_reduce(&tmp_buf, modulus, mod_len);
-        }
-    }
-
-    result
-}
-
-/// Reduces a double-width number modulo `modulus` using trial subtraction.
-///
-/// This is a simple shift-and-subtract algorithm.  For the small key sizes
-/// used by Westwood (320-bit), this is fast enough.
-fn bn_mod_reduce(product: &[u32], modulus: &BigNum, mod_len: usize) -> BigNum {
-    // Copy product into a stack-allocated working buffer.
-    // BN_DOUBLE = 129 words = 516 bytes — avoids heap allocation.
-    let prod_len = mod_len * 2 + 1;
-    let mut rem = [0u32; BN_DOUBLE];
-    let copy_len = prod_len.min(product.len()).min(BN_DOUBLE);
-    rem[..copy_len].copy_from_slice(&product[..copy_len]);
-
-    // Find effective length of remainder.
-    let mut rem_len = prod_len;
-    while rem_len > 0 && rem[rem_len - 1] == 0 {
-        rem_len -= 1;
-    }
-
-    // Repeated subtraction with alignment.
-    // We align the modulus to the top of the remainder and subtract downward.
-    let mod_bits = bn_bitlen(modulus);
-    let rem_bits = {
-        if rem_len == 0 {
-            0
-        } else {
-            (rem_len - 1) * 32 + (32 - rem[rem_len - 1].leading_zeros() as usize)
-        }
-    };
-
-    if rem_bits <= mod_bits {
-        // Already smaller than modulus — just copy.
-        let mut result = bn_zero();
-        result[..mod_len.min(rem_len)].copy_from_slice(&rem[..mod_len.min(rem_len)]);
-        // Final check: if result >= modulus, subtract once.
-        if bn_cmp(&result, modulus) >= 0 {
-            let mut tmp = bn_zero();
-            bn_sub(&mut tmp, &result, modulus);
-            return tmp;
-        }
-        return result;
-    }
-
-    // Shift-and-subtract: process one bit at a time from the top.
-    // We build the remainder by shifting in one bit at a time from the
-    // product, subtracting the modulus whenever the partial remainder
-    // is >= modulus.
-    let mut result = bn_zero();
-    for bit in (0..rem_bits).rev() {
-        // Shift result left by 1 bit.
-        let mut carry = 0u32;
-        for word in result.iter_mut().take(mod_len) {
-            let new_carry = *word >> 31;
-            *word = (*word << 1) | carry;
-            carry = new_carry;
-        }
-
-        // Bring in the next bit from the product.
-        let word_idx = bit / 32;
-        let bit_idx = bit % 32;
-        if word_idx < rem.len() {
-            result[0] |= (rem[word_idx] >> bit_idx) & 1;
-        }
-
-        // If result >= modulus, subtract.
-        if bn_cmp(&result, modulus) >= 0 {
-            let mut tmp = bn_zero();
-            bn_sub(&mut tmp, &result, modulus);
-            result = tmp;
-        }
-    }
-
-    result
-}
+mod bignum;
+use bignum::{
+    bn_bitlen, bn_from_be_bytes, bn_from_le_bytes, bn_from_u32, bn_mod_exp, bn_to_le_bytes, BigNum,
+};
+// Re-export additional bignum functions for use by tests.
+#[cfg(test)]
+use bignum::{bn_cmp, bn_len, bn_mul, bn_sub, bn_zero, BN_WORDS};
 
 // ─── Public Key Initialization ───────────────────────────────────────────────
 
@@ -426,36 +89,44 @@ struct PubKey {
 ///
 /// The base-64 string encodes a DER-like structure: one tag byte (`0x02`),
 /// a length byte, then the raw modulus bytes in big-endian order.
-fn init_pubkey() -> PubKey {
-    let (raw, raw_len) = b64_decode(PUBKEY_STR);
-    let raw = &raw[..raw_len];
+fn init_pubkey() -> Result<PubKey, Error> {
+    use base64::prelude::*;
+
+    // Decode the standard base-64 public key string.
+    let raw = BASE64_STANDARD_NO_PAD
+        .decode(PUBKEY_STR)
+        .map_err(|_| Error::InvalidMagic {
+            context: "MIX public key base64",
+        })?;
 
     // The decoded bytes start with a DER-like tag: 0x02 (INTEGER), then length.
     // XCC's key_to_bignum skips the tag byte and reads the length.
     let modulus = if raw.len() >= 2 {
         // Safe reads via helpers (defense-in-depth).
-        let tag = read_u8(raw, 0).unwrap_or(0);
+        let tag = read_u8(&raw, 0).unwrap_or(0);
         if tag == 0x02 {
             // Simple length encoding (single byte, no high-bit flag for our key).
-            let key_len = read_u8(raw, 1).unwrap_or(0) as usize;
-            let key_bytes = &raw[2..2 + key_len.min(raw.len() - 2)];
+            let key_len = read_u8(&raw, 1).unwrap_or(0) as usize;
+            let end = 2 + key_len.min(raw.len().saturating_sub(2));
+            let key_bytes = raw.get(2..end).unwrap_or(&[]);
             bn_from_be_bytes(key_bytes)
         } else {
-            bn_from_be_bytes(raw)
+            bn_from_be_bytes(&raw)
         }
     } else {
         // Fallback: treat entire decoded output as big-endian modulus.
-        bn_from_be_bytes(raw)
+        bn_from_be_bytes(&raw)
     };
 
     let exponent = bn_from_u32(PUBLIC_EXPONENT);
+
     let mod_bitlen = bn_bitlen(&modulus);
 
-    PubKey {
+    Ok(PubKey {
         modulus,
         exponent,
         mod_bitlen,
-    }
+    })
 }
 
 // ─── Key Derivation ──────────────────────────────────────────────────────────
@@ -478,7 +149,7 @@ pub(crate) fn derive_blowfish_key(key_source: &[u8]) -> Result<[u8; BLOWFISH_KEY
         });
     }
 
-    let pubkey = init_pubkey();
+    let pubkey = init_pubkey()?;
 
     // `a` = number of output bytes per RSA chunk.
     // `a + 1` = number of input bytes consumed per chunk.
@@ -510,7 +181,9 @@ pub(crate) fn derive_blowfish_key(key_source: &[u8]) -> Result<[u8; BLOWFISH_KEY
 
         // Extract the low `a` bytes in little-endian order into key_buf.
         let write_end = (key_len + chunk_out).min(key_buf.len());
-        bn_to_le_bytes(&result, &mut key_buf[key_len..write_end]);
+        if let Some(dst) = key_buf.get_mut(key_len..write_end) {
+            bn_to_le_bytes(&result, dst);
+        }
         key_len = write_end;
 
         offset += chunk_in;
@@ -524,7 +197,12 @@ pub(crate) fn derive_blowfish_key(key_source: &[u8]) -> Result<[u8; BLOWFISH_KEY
     }
 
     let mut key = [0u8; BLOWFISH_KEY_LEN];
-    key.copy_from_slice(&key_buf[..BLOWFISH_KEY_LEN]);
+    let src = key_buf
+        .get(..BLOWFISH_KEY_LEN)
+        .ok_or(Error::DecompressionError {
+            reason: "key buffer too short for Blowfish key",
+        })?;
+    key.copy_from_slice(src);
     Ok(key)
 }
 
@@ -554,13 +232,14 @@ pub(crate) fn decrypt_mix_header(
 ) -> Result<Vec<u8>, Error> {
     use blowfish::cipher::BlockDecrypt;
     use blowfish::cipher::KeyInit;
-    use blowfish::BlowfishLE;
+    // Standard (big-endian) Blowfish — the default generic parameter is BE.
+    type BlowfishBE = blowfish::Blowfish;
 
-    // Initialize Blowfish with the derived 56-byte key.
-    // `BlowfishLE` reads/writes each u32 half in little-endian order,
-    // matching the Westwood MIX encryption format.  This eliminates the
-    // need for manual byte-swapping around each block operation.
-    let cipher = BlowfishLE::new_from_slice(key).map_err(|_| Error::DecompressionError {
+    // Initialize standard (big-endian) Blowfish with the derived 56-byte key.
+    // Westwood's implementation (and OpenRA's port) byte-swaps each u32 half
+    // to big-endian before the Feistel rounds and back to little-endian after.
+    // The `blowfish` crate's standard `Blowfish` type does exactly this.
+    let cipher = BlowfishBE::new_from_slice(key).map_err(|_| Error::DecompressionError {
         reason: "failed to initialize Blowfish cipher",
     })?;
 
@@ -579,8 +258,8 @@ pub(crate) fn decrypt_mix_header(
         available: encrypted_data.len(),
     })?;
     first_block.copy_from_slice(first_slice);
-    // BlowfishLE operates directly on little-endian u32 pairs, matching
-    // the Westwood on-disk format — no manual byte-swapping needed.
+    // Standard Blowfish byte-swaps the u32 halves internally, matching
+    // Westwood's swap-before-rounds convention.
     cipher.decrypt_block(
         blowfish::cipher::generic_array::GenericArray::from_mut_slice(&mut first_block),
     );
@@ -629,7 +308,14 @@ pub(crate) fn decrypt_mix_header(
         cipher.decrypt_block(
             blowfish::cipher::generic_array::GenericArray::from_mut_slice(&mut block),
         );
-        decrypted[src_off..src_off + 8].copy_from_slice(&block);
+        let dec_len = decrypted.len();
+        let dst = decrypted
+            .get_mut(src_off..src_off + 8)
+            .ok_or(Error::UnexpectedEof {
+                needed: src_off + 8,
+                available: dec_len,
+            })?;
+        dst.copy_from_slice(&block);
     }
 
     // Return only the meaningful bytes (not the padding).

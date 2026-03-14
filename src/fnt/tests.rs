@@ -5,37 +5,85 @@ use super::*;
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
-/// Builds a minimal valid FNT file.
-///
-/// Creates a font with the given `height`.  Only glyph `0x41` ('A') has
-/// non-zero width (`glyph_w`); all other glyphs have width 0.  The 'A'
-/// glyph data is filled with `0xFF` bytes (all pixels set).
-fn build_fnt(height: u8, glyph_w: u16) -> Vec<u8> {
-    let bytes_per_col = (height as usize).div_ceil(8);
-    let glyph_size = (glyph_w as usize) * bytes_per_col;
+/// Writes a little-endian `u16` at the given offset in a buffer.
+fn write_u16_le(buf: &mut [u8], offset: usize, value: u16) {
+    buf[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
 
-    // File layout: header (6) + widths (512) + offsets (512) + glyph data.
-    let data_area_start = 6 + 512 + 512;
-    let total = data_area_start + glyph_size;
+/// Builds a minimal valid FNT file matching the canonical 20-byte block-offset
+/// header format (EA FONT.H + Vanilla-Conquer `FontHeader`).
+///
+/// Creates a font with `num_chars` entries.  Only glyph `0x41` ('A') has
+/// non-zero width (`glyph_w`); all others have width 0.  The 'A' glyph
+/// data is filled with `0x12` (pixel 0 = color 2, pixel 1 = color 1)
+/// to test 4bpp nibble extraction.
+///
+/// ## Layout (matches EA file layout order)
+/// ```text
+/// [Header]         20 bytes  (offsets 0–19)
+/// [Offset table]   num_chars × u16  (at OffsetBlockOffset)
+/// [Width table]    num_chars × u8   (at WidthBlockOffset)
+/// [Glyph data]     variable         (at DataBlockOffset)
+/// [Height table]   num_chars × u16  (at HeightOffset)
+/// ```
+fn build_fnt(max_height: u8, glyph_w: u8, num_chars: u16) -> Vec<u8> {
+    let nc = num_chars as usize;
+    // 4bpp: ceil(width / 2) bytes per row.
+    let bytes_per_row = (glyph_w as usize).div_ceil(2);
+    let data_rows = max_height; // Simple: all rows stored.
+    let glyph_size = bytes_per_row * (data_rows as usize);
+
+    // Block layout after 20-byte header — matches EA file ordering:
+    // offsets → widths → glyph data → heights.
+    let offset_table_start = 20usize;
+    let offset_table_size = nc * 2;
+    let width_table_start = offset_table_start + offset_table_size;
+    let width_table_size = nc;
+    let data_area_start = width_table_start + width_table_size;
+    let height_table_start = data_area_start + glyph_size;
+    let height_table_size = nc * 2;
+    let total = height_table_start + height_table_size;
+
     let mut buf = vec![0u8; total];
 
-    // Header.
-    buf[0..2].copy_from_slice(&(total as u16).to_le_bytes()); // data_size
-    buf[2] = height;
-    buf[3] = glyph_w as u8; // max_width
-    buf[4..6].copy_from_slice(&0u16.to_le_bytes()); // unknown
+    // ── Header (20 bytes) ──
+    write_u16_le(&mut buf, 0, total as u16); // FontLength
+    buf[2] = 0; // FontCompress (uncompressed)
+    buf[3] = 5; // FontDataBlocks
+    write_u16_le(&mut buf, 4, 0x0010); // InfoBlockOffset (16)
+    write_u16_le(&mut buf, 6, offset_table_start as u16); // OffsetBlockOffset
+    write_u16_le(&mut buf, 8, width_table_start as u16); // WidthBlockOffset
+    write_u16_le(&mut buf, 10, data_area_start as u16); // DataBlockOffset
+    write_u16_le(&mut buf, 12, height_table_start as u16); // HeightOffset
+    write_u16_le(&mut buf, 14, 0x1012); // UnknownConst
+    buf[16] = 0; // Pad
+    buf[17] = (num_chars - 1) as u8; // CharCount (last char index)
+    buf[18] = max_height; // MaxHeight
+    buf[19] = glyph_w; // MaxWidth
 
-    // Width table: 256 × u16.  Set glyph 0x41 ('A') width.
-    let w_offset = 6 + 0x41 * 2;
-    buf[w_offset..w_offset + 2].copy_from_slice(&glyph_w.to_le_bytes());
+    // ── Width table: set glyph 0x41 ('A') width ──
+    if nc > 0x41 {
+        buf[width_table_start + 0x41] = glyph_w;
+    }
 
-    // Offset table: 256 × u16.  Set glyph 0x41 offset to data_area_start.
-    let o_offset = 6 + 512 + 0x41 * 2;
-    buf[o_offset..o_offset + 2].copy_from_slice(&(data_area_start as u16).to_le_bytes());
+    // ── Offset table: set glyph 0x41 offset to data_area_start ──
+    if nc > 0x41 {
+        let o_pos = offset_table_start + 0x41 * 2;
+        write_u16_le(&mut buf, o_pos, data_area_start as u16);
+    }
 
-    // Glyph data: all pixels set.
-    for b in buf[data_area_start..].iter_mut() {
-        *b = 0xFF;
+    // ── Height table: set all entries. ──
+    // For glyph 0x41: y_offset=0, data_rows=max_height.
+    // For all others: y_offset=0, data_rows=0 (no data).
+    if nc > 0x41 {
+        let h_pos = height_table_start + 0x41 * 2;
+        // Low byte = y_offset (0), high byte = data_rows.
+        write_u16_le(&mut buf, h_pos, (data_rows as u16) << 8);
+    }
+
+    // ── Glyph data: fill with 0x12 (low nibble=2, high nibble=1). ──
+    for b in buf[data_area_start..data_area_start + glyph_size].iter_mut() {
+        *b = 0x12;
     }
 
     buf
@@ -46,122 +94,135 @@ fn build_fnt(height: u8, glyph_w: u16) -> Vec<u8> {
 /// Parses a well-formed FNT file and checks header fields.
 #[test]
 fn parse_basic() {
-    let data = build_fnt(8, 6);
+    let data = build_fnt(8, 6, 256);
     let fnt = FntFile::parse(&data).unwrap();
-    assert_eq!(fnt.header.height, 8);
+    assert_eq!(fnt.header.max_height, 8);
     assert_eq!(fnt.header.max_width, 6);
+    assert_eq!(fnt.header.compress, 0);
+    assert_eq!(fnt.header.data_blocks, 5);
+    assert_eq!(fnt.header.num_chars, 256);
     assert_eq!(fnt.glyphs.len(), 256);
 }
 
 /// Glyph 'A' (0x41) has the correct width and non-empty data.
 #[test]
 fn glyph_a_populated() {
-    let data = build_fnt(8, 6);
+    let data = build_fnt(8, 6, 256);
     let fnt = FntFile::parse(&data).unwrap();
     let glyph = &fnt.glyphs[0x41];
     assert_eq!(glyph.code, 0x41);
     assert_eq!(glyph.width, 6);
-    assert_eq!(glyph.height, 8);
-    // height=8 → 1 byte per column, width=6 → 6 bytes total.
-    assert_eq!(glyph.data.len(), 6);
+    assert_eq!(glyph.y_offset, 0);
+    assert_eq!(glyph.data_rows, 8);
+    // 4bpp: ceil(6/2) = 3 bytes per row, 8 rows = 24 bytes total.
+    assert_eq!(glyph.data.len(), 24);
 }
 
 /// Zero-width glyphs have empty data.
 #[test]
 fn zero_width_glyph() {
-    let data = build_fnt(8, 6);
+    let data = build_fnt(8, 6, 256);
     let fnt = FntFile::parse(&data).unwrap();
     // Glyph 0x00 has width 0.
     assert_eq!(fnt.glyphs[0].width, 0);
     assert!(fnt.glyphs[0].data.is_empty());
 }
 
-/// Pixel query returns correct values for an all-set glyph.
+/// Pixel query returns correct 4-bit color indices for 4bpp nibble-packed data.
+///
+/// How: the test data is filled with 0x12. In 4bpp nibble packing (low nibble
+/// first), byte 0x12 → pixel 0 = 0x2, pixel 1 = 0x1.
 #[test]
-fn pixel_query() {
-    let data = build_fnt(8, 6);
+fn pixel_query_4bpp() {
+    let data = build_fnt(8, 6, 256);
     let fnt = FntFile::parse(&data).unwrap();
     let glyph = &fnt.glyphs[0x41];
-    // All pixels should be set (data is 0xFF).
-    assert!(glyph.pixel(0, 0));
-    assert!(glyph.pixel(5, 7));
-    // Out of bounds returns false.
-    assert!(!glyph.pixel(6, 0));
-    assert!(!glyph.pixel(0, 8));
+    // Byte 0x12: low nibble = 2, high nibble = 1.
+    assert_eq!(glyph.pixel(0, 0), 2); // even x → low nibble
+    assert_eq!(glyph.pixel(1, 0), 1); // odd x → high nibble
+    assert_eq!(glyph.pixel(2, 0), 2); // even x → low nibble of next byte
+                                      // Out of bounds returns 0 (transparent).
+    assert_eq!(glyph.pixel(6, 0), 0);
+    assert_eq!(glyph.pixel(0, 8), 0);
 }
 
-/// Pixel query on a zero-width glyph always returns false.
+/// Pixel query on a zero-width glyph always returns 0 (transparent).
 #[test]
 fn pixel_query_zero_width() {
-    let data = build_fnt(8, 6);
+    let data = build_fnt(8, 6, 256);
     let fnt = FntFile::parse(&data).unwrap();
-    assert!(!fnt.glyphs[0].pixel(0, 0));
+    assert_eq!(fnt.glyphs[0].pixel(0, 0), 0);
 }
 
-/// Font with non-byte-aligned height (e.g. 12 → 2 bytes per column).
+/// Font with smaller character count (e.g. 128) parses correctly.
+///
+/// Why: the format supports variable character counts via the CharCount
+/// header field.  This verifies non-256 counts work.
 #[test]
-fn non_byte_aligned_height() {
-    let data = build_fnt(12, 4);
+fn variable_char_count() {
+    let data = build_fnt(8, 4, 128);
     let fnt = FntFile::parse(&data).unwrap();
-    let glyph = &fnt.glyphs[0x41];
-    // height=12 → ceil(12/8) = 2 bytes per column, width=4 → 8 bytes total.
-    assert_eq!(glyph.data.len(), 8);
-    assert!(glyph.pixel(0, 0));
-    assert!(glyph.pixel(0, 11));
+    assert_eq!(fnt.header.num_chars, 128);
+    assert_eq!(fnt.glyphs.len(), 128);
 }
 
 // ─── Error paths ─────────────────────────────────────────────────────────────
 
-/// Truncated file returns UnexpectedEof.
-///
-/// The minimum file size is 6 + 512 + 512 = 1030 bytes.
+/// Truncated file (shorter than 20-byte header) returns UnexpectedEof.
 #[test]
-fn truncated_file() {
-    let data = [0u8; 1029];
+fn truncated_header() {
+    let data = [0u8; 19];
     let err = FntFile::parse(&data).unwrap_err();
     assert!(matches!(
         err,
         Error::UnexpectedEof {
-            needed: 1030,
-            available: 1029
+            needed: 20,
+            available: 19
         }
     ));
+}
+
+/// Non-zero compression flag returns InvalidMagic.
+///
+/// Why: EA LOADFONT.CPP checks compress == 0.
+#[test]
+fn compressed_rejected() {
+    let mut data = build_fnt(8, 6, 256);
+    data[2] = 1; // FontCompress = 1
+    let err = FntFile::parse(&data).unwrap_err();
+    assert!(matches!(err, Error::InvalidMagic { .. }));
+}
+
+/// Wrong data-block count returns InvalidMagic.
+///
+/// Why: EA LOADFONT.CPP checks data_blocks == 5.
+#[test]
+fn wrong_data_blocks_rejected() {
+    let mut data = build_fnt(8, 6, 256);
+    data[3] = 4; // FontDataBlocks = 4
+    let err = FntFile::parse(&data).unwrap_err();
+    assert!(matches!(err, Error::InvalidMagic { .. }));
 }
 
 /// Glyph data pointing past EOF returns UnexpectedEof.
 #[test]
 fn glyph_data_past_eof() {
-    let mut data = build_fnt(8, 6);
+    let mut data = build_fnt(8, 6, 256);
     // Truncate the glyph data area.
     data.truncate(data.len() - 1);
     let err = FntFile::parse(&data).unwrap_err();
     assert!(matches!(err, Error::UnexpectedEof { .. }));
 }
 
-/// Font height over V38 cap returns InvalidSize.
+/// Width table truncated returns UnexpectedEof.
 #[test]
-fn height_over_cap() {
-    let mut data = vec![0u8; 1030];
-    data[2] = 255; // height = 255 (within cap)
-                   // Height 255 is still within MAX_FONT_HEIGHT (256).
-                   // We need to actually exceed 256, but height is u8 so max is 255.
-                   // This test verifies that 255 is accepted.
-                   // The V38 cap is MAX_FONT_HEIGHT = 256, so u8 values never exceed it.
-                   // Instead, let's test the glyph width cap.
-    let mut data2 = vec![0u8; 1030];
-    data2[2] = 8; // height = 8
-                  // Set glyph 0x41 width to 257 (over MAX_GLYPH_WIDTH = 256).
-    let w_pos = 6 + 0x41 * 2;
-    data2[w_pos..w_pos + 2].copy_from_slice(&257u16.to_le_bytes());
-    let err = FntFile::parse(&data2).unwrap_err();
-    assert!(matches!(
-        err,
-        Error::InvalidSize {
-            value: 257,
-            limit: 256,
-            ..
-        }
-    ));
+fn truncated_width_table() {
+    let mut data = build_fnt(8, 6, 256);
+    // Point width_block_offset past end of file.
+    let len_plus_1 = (data.len() + 1) as u16;
+    write_u16_le(&mut data, 8, len_plus_1);
+    let err = FntFile::parse(&data).unwrap_err();
+    assert!(matches!(err, Error::UnexpectedEof { .. }));
 }
 
 // ─── Determinism ─────────────────────────────────────────────────────────────
@@ -169,7 +230,7 @@ fn height_over_cap() {
 /// Parsing the same input twice yields identical results.
 #[test]
 fn deterministic() {
-    let data = build_fnt(8, 6);
+    let data = build_fnt(8, 6, 256);
     let a = FntFile::parse(&data).unwrap();
     let b = FntFile::parse(&data).unwrap();
     assert_eq!(a, b);
@@ -180,27 +241,57 @@ fn deterministic() {
 /// Error Display includes numeric context.
 #[test]
 fn error_display_includes_values() {
-    let data = [0u8; 100];
+    let data = [0u8; 10];
     let err = FntFile::parse(&data).unwrap_err();
     let msg = format!("{err}");
-    assert!(msg.contains("1030"));
-    assert!(msg.contains("100"));
+    assert!(msg.contains("20"));
+    assert!(msg.contains("10"));
 }
 
 // ─── Integer overflow safety ─────────────────────────────────────────────────
+
+/// Glyph width at exactly MAX_GLYPH_WIDTH (256) with sufficient data
+/// succeeds.
+///
+/// Why: boundary complement — width 257 would be rejected.  Verifies the
+/// exact cap value is accepted.  Since glyph width is u8, max is 255
+/// which is always within the cap.
+#[test]
+fn at_max_glyph_width_accepted() {
+    let data = build_fnt(8, 255, 256);
+    let fnt = FntFile::parse(&data).unwrap();
+    let glyph = fnt.glyphs.get(0x41).unwrap();
+    assert_eq!(glyph.width, 255);
+}
 
 /// Glyph with large width × tall height uses saturating arithmetic and
 /// does not panic.
 #[test]
 fn glyph_size_overflow_no_panic() {
-    let mut data = vec![0u8; 1030];
-    data[2] = 255; // height = 255 → bytes_per_col = 32
-                   // Set glyph 0x00 width to 256 (max allowed).
-    data[6..8].copy_from_slice(&256u16.to_le_bytes());
-    // Offset for glyph 0x00 pointing to data_area_start.
-    let o_pos = 6 + 512;
-    data[o_pos..o_pos + 2].copy_from_slice(&1030u16.to_le_bytes());
-    // Glyph data size would be 256 * 32 = 8192 bytes, way past our 1030-byte file.
+    // Build a minimal header that declares large dimensions but the file
+    // is too short. Parser must not panic on overflow.
+    let mut data = vec![0u8; 40];
+    // Valid header skeleton.
+    write_u16_le(&mut data, 0, 40); // FontLength
+    data[2] = 0; // compress
+    data[3] = 5; // data_blocks
+    write_u16_le(&mut data, 4, 0x0010); // info block
+    write_u16_le(&mut data, 6, 20); // offset table at 20
+    write_u16_le(&mut data, 8, 24); // width table at 24 (nc=2, so 2 entries)
+    write_u16_le(&mut data, 10, 30); // data block
+    write_u16_le(&mut data, 12, 26); // height table at 26
+    write_u16_le(&mut data, 14, 0x1012);
+    data[16] = 0; // pad
+    data[17] = 1; // CharCount raw = 1 → num_chars = 2
+    data[18] = 255; // MaxHeight = 255
+    data[19] = 255; // MaxWidth = 255
+                    // Width table: char 0 width = 255.
+    data[24] = 255;
+    // Height entry char 0: y_offset=0, data_rows=255.
+    write_u16_le(&mut data, 26, 0xFF00);
+    // Offset for char 0 pointing to data block start.
+    write_u16_le(&mut data, 20, 30);
+    // Glyph data size = ceil(255/2) * 255 = 128 * 255 = 32640 — way past 40 bytes.
     let err = FntFile::parse(&data).unwrap_err();
     assert!(matches!(err, Error::UnexpectedEof { .. }));
 }
@@ -209,56 +300,39 @@ fn glyph_size_overflow_no_panic() {
 
 /// All-0xFF input must not panic — maximum field values in every position.
 ///
-/// Why: height=255, all widths=0xFFFF, all offsets=0xFFFF — the worst case
-/// for integer overflow.  The parser must reject gracefully.
+/// Why (V38): compress=0xFF and data_blocks=0xFF hit the validation checks
+/// before any table parsing.  Ensures early rejection without panic.
 #[test]
 fn adversarial_all_ff_no_panic() {
     let data = [0xFF; 2048];
     let _ = FntFile::parse(&data);
 }
 
-/// All-zero input (at minimum size) must not panic.
+/// All-zero input at header size must not panic.
 ///
-/// Why: height=0 triggers the V38 zero-height check.  The parser must
-/// reject without panicking on division in bytes_per_col.
+/// Why (V38): compress=0 and data_blocks=0 (≠5) should be rejected by
+/// the data-blocks check without accessing any table data.
 #[test]
 fn adversarial_all_zero_no_panic() {
-    let data = [0u8; 1030];
+    let data = [0u8; 20];
     let _ = FntFile::parse(&data);
 }
 
-/// Offset pointing to the middle of the width table (inside the header area)
-/// must not cause the parser to misinterpret header data as glyph pixels.
+/// Offset pointing into the header area must not cause misinterpretation.
 ///
-/// Why: a crafted file could set glyph offsets to overlap with the header
-/// or width table.  The parser should still succeed (offsets are addresses
-/// within the file, not restricted to the data area).
+/// Why: a crafted file could set glyph offsets to overlap with the header.
+/// The parser should still succeed (offsets are addresses within the file,
+/// not restricted to the data area).
 #[test]
 fn adversarial_offset_inside_header() {
-    let mut data = vec![0u8; 1030];
-    data[2] = 8; // height = 8, bytes_per_col = 1
-                 // Set glyph 0x00 width = 1 (needs 1 byte of data).
-    data[6..8].copy_from_slice(&1u16.to_le_bytes());
-    // Point glyph 0x00 offset to byte 10 (inside the width table).
-    let o_pos = 6 + 512;
-    data[o_pos..o_pos + 2].copy_from_slice(&10u16.to_le_bytes());
+    let mut data = build_fnt(8, 4, 256);
+    // Point glyph 0x41 offset to byte 0 (inside the header).
+    let nc = 256usize;
+    let _ = nc; // used only for documentation clarity
+    let offset_table_start = 20;
+    let o_pos = offset_table_start + 0x41 * 2;
+    write_u16_le(&mut data, o_pos, 0);
     // This is valid — the parser should not panic.
     let result = FntFile::parse(&data);
     assert!(result.is_ok());
-}
-
-/// Every glyph with max width (256) and max height (255) — massive
-/// data requirements that exceed the file.  Must not allocate or panic.
-#[test]
-fn adversarial_all_glyphs_max_width() {
-    let mut data = vec![0u8; 1030];
-    data[2] = 255; // height = 255
-                   // Set every glyph width to 256.
-    for i in 0..256 {
-        let pos = 6 + i * 2;
-        data[pos..pos + 2].copy_from_slice(&256u16.to_le_bytes());
-    }
-    // Various offsets — doesn't matter, glyph data won't fit.
-    let err = FntFile::parse(&data).unwrap_err();
-    assert!(matches!(err, Error::UnexpectedEof { .. }));
 }

@@ -5,43 +5,47 @@ use super::*;
 
 // ─── TD test helpers ─────────────────────────────────────────────────────────
 
-/// Builds a minimal valid Tiberian Dawn TMP file.
+/// Builds a minimal valid Tiberian Dawn TMP file matching `IControl_Type`.
 ///
-/// Constructs a `grid_w × grid_h` grid with `tile_count` tiles, each
-/// `tile_w × tile_h` pixels.  The icon map maps each cell to
-/// `cell_index % tile_count`.  Tile pixels are filled with the tile index
-/// as a byte value.
-fn build_td_tmp(grid_w: u16, grid_h: u16, tile_count: u16, tile_w: u16, tile_h: u16) -> Vec<u8> {
-    let grid_size = (grid_w as usize) * (grid_h as usize);
-    let tile_area = (tile_w as usize) * (tile_h as usize);
-    let map_end = 20 + grid_size;
-    let total = map_end + (tile_count as usize) * tile_area;
+/// Constructs an icon set with `count` tiles, each `iw × ih` pixels.
+/// The map data (at offset `map_off`) contains `count` sequential byte
+/// values.  Tile pixels are filled with the tile index as a byte value.
+///
+/// Layout:
+/// ```text
+/// [0..32]       IControl_Type header (32 bytes)
+/// [32..32+map]  Map data (count bytes)
+/// [icons_off..] Icon pixel data (count × iw × ih bytes)
+/// ```
+fn build_td_tmp(iw: u16, ih: u16, count: u16) -> Vec<u8> {
+    let icon_area = (iw as usize) * (ih as usize);
+    let map_start = TD_HEADER_SIZE; // 32
+    let map_size = count as usize;
+    let icons_start = map_start + map_size;
+    let total = icons_start + (count as usize) * icon_area;
     let mut buf = vec![0u8; total];
 
-    // Header: width, height, tile_count, allocated, tile_w, tile_h,
-    // file_size (u32), image_start (u32).
-    buf[0..2].copy_from_slice(&grid_w.to_le_bytes());
-    buf[2..4].copy_from_slice(&grid_h.to_le_bytes());
-    buf[4..6].copy_from_slice(&tile_count.to_le_bytes());
-    buf[6..8].copy_from_slice(&tile_count.to_le_bytes()); // allocated = tile_count
-    buf[8..10].copy_from_slice(&tile_w.to_le_bytes());
-    buf[10..12].copy_from_slice(&tile_h.to_le_bytes());
-    buf[12..16].copy_from_slice(&(total as u32).to_le_bytes());
-    buf[16..20].copy_from_slice(&0u32.to_le_bytes()); // image_start = 0
+    // Header: IControl_Type (32 bytes).
+    buf[0..2].copy_from_slice(&iw.to_le_bytes()); // icon_width
+    buf[2..4].copy_from_slice(&ih.to_le_bytes()); // icon_height
+    buf[4..6].copy_from_slice(&count.to_le_bytes()); // count
+    buf[6..8].copy_from_slice(&count.to_le_bytes()); // allocated = count
+    buf[8..12].copy_from_slice(&(total as u32).to_le_bytes()); // size
+    buf[12..16].copy_from_slice(&(icons_start as u32).to_le_bytes()); // icons_offset
+    buf[16..20].copy_from_slice(&0u32.to_le_bytes()); // palettes_offset
+    buf[20..24].copy_from_slice(&0u32.to_le_bytes()); // remaps_offset
+    buf[24..28].copy_from_slice(&0u32.to_le_bytes()); // trans_flag_offset
+    buf[28..32].copy_from_slice(&(map_start as u32).to_le_bytes()); // map_offset
 
-    // Icon map: sequential tile indices (or 0 if no tiles).
-    for i in 0..grid_size {
-        buf[20 + i] = if tile_count == 0 {
-            0
-        } else {
-            (i % (tile_count as usize)) as u8
-        };
+    // Map data: sequential indices (or 0 if no tiles).
+    for i in 0..map_size {
+        buf[map_start + i] = i as u8;
     }
 
     // Tile pixel data: each tile filled with its index value.
-    for t in 0..tile_count as usize {
-        let start = map_end + t * tile_area;
-        for p in 0..tile_area {
+    for t in 0..count as usize {
+        let start = icons_start + t * icon_area;
+        for p in 0..icon_area {
             buf[start + p] = t as u8;
         }
     }
@@ -98,92 +102,97 @@ fn build_ra_tmp(image_w: u32, image_h: u32, tw: u32, th: u32, empty_indices: &[u
 
 // ─── TD basic functionality ──────────────────────────────────────────────────
 
-/// Parses a well-formed TD TMP with a 2×2 grid and 2 distinct tiles.
+/// Parses a well-formed TD TMP with 2 distinct 24×24 tiles.
 #[test]
 fn td_parse_basic() {
-    let data = build_td_tmp(2, 2, 2, 24, 24);
+    let data = build_td_tmp(24, 24, 2);
     let tmp = TdTmpFile::parse(&data).unwrap();
-    assert_eq!(tmp.header.width, 2);
-    assert_eq!(tmp.header.height, 2);
-    assert_eq!(tmp.header.tile_count, 2);
-    assert_eq!(tmp.header.tile_w, 24);
-    assert_eq!(tmp.header.tile_h, 24);
+    assert_eq!(tmp.header.icon_width, 24);
+    assert_eq!(tmp.header.icon_height, 24);
+    assert_eq!(tmp.header.count, 2);
     assert_eq!(tmp.tiles.len(), 2);
-    assert_eq!(tmp.icon_map.len(), 4);
+    assert_eq!(tmp.map_data.len(), 2);
     // First tile should be filled with 0x00.
     assert!(tmp.tiles[0].pixels.iter().all(|&b| b == 0));
     // Second tile should be filled with 0x01.
     assert!(tmp.tiles[1].pixels.iter().all(|&b| b == 1));
 }
 
-/// Parses a TD TMP with zero tiles and a 1×1 grid.
+/// Parses a TD TMP with zero tiles.
 ///
-/// Files with zero tile_count are valid (empty template).  The icon map
-/// still exists (1 byte), but no tile data follows.
+/// Files with zero count are valid (empty template).  No map data or
+/// tile data follows.
 #[test]
 fn td_parse_zero_tiles() {
-    let data = build_td_tmp(1, 1, 0, 24, 24);
+    let data = build_td_tmp(24, 24, 0);
     let tmp = TdTmpFile::parse(&data).unwrap();
-    assert_eq!(tmp.header.tile_count, 0);
+    assert_eq!(tmp.header.count, 0);
     assert_eq!(tmp.tiles.len(), 0);
-    assert_eq!(tmp.icon_map.len(), 1);
+    assert!(tmp.map_data.is_empty());
 }
 
 /// Parses a TD TMP with custom (non-24) tile dimensions.
 ///
-/// The parser must accept arbitrary tile sizes, not just 24×24.
+/// The parser must accept arbitrary icon sizes, not just 24×24.
 #[test]
 fn td_parse_custom_tile_size() {
-    let data = build_td_tmp(1, 1, 1, 16, 16);
+    let data = build_td_tmp(16, 16, 1);
     let tmp = TdTmpFile::parse(&data).unwrap();
-    assert_eq!(tmp.header.tile_w, 16);
-    assert_eq!(tmp.header.tile_h, 16);
+    assert_eq!(tmp.header.icon_width, 16);
+    assert_eq!(tmp.header.icon_height, 16);
     assert_eq!(tmp.tiles[0].pixels.len(), 256);
 }
 
 // ─── TD error paths ──────────────────────────────────────────────────────────
 
-/// Input shorter than the TD header (20 bytes) returns UnexpectedEof.
+/// Input shorter than the TD header (32 bytes) returns UnexpectedEof.
 #[test]
 fn td_truncated_header() {
-    let data = [0u8; 19];
+    let data = [0u8; 31];
     let err = TdTmpFile::parse(&data).unwrap_err();
     assert!(matches!(
         err,
         Error::UnexpectedEof {
-            needed: 20,
-            available: 19
+            needed: 32,
+            available: 31
         }
     ));
 }
 
-/// Truncated icon map returns UnexpectedEof.
+/// Truncated map data returns UnexpectedEof.
 #[test]
 fn td_truncated_icon_map() {
-    // 2×2 grid needs 4 bytes of icon map after 20-byte header = 24 bytes.
-    let data = build_td_tmp(2, 2, 1, 24, 24);
-    let short = &data[..22]; // header + only 2 map bytes
-    let err = TdTmpFile::parse(short).unwrap_err();
+    // 2 tiles with map_offset pointing to offset 32, needs 2 bytes.
+    // Supply only 33 bytes (just 1 map byte instead of 2).
+    let mut data = vec![0u8; 33];
+    data[0..2].copy_from_slice(&24u16.to_le_bytes()); // icon_width
+    data[2..4].copy_from_slice(&24u16.to_le_bytes()); // icon_height
+    data[4..6].copy_from_slice(&2u16.to_le_bytes()); // count=2
+    data[6..8].copy_from_slice(&2u16.to_le_bytes()); // allocated
+    data[8..12].copy_from_slice(&0u32.to_le_bytes()); // size
+    data[12..16].copy_from_slice(&0u32.to_le_bytes()); // icons_offset
+    data[28..32].copy_from_slice(&32u32.to_le_bytes()); // map_offset=32
+    let err = TdTmpFile::parse(&data).unwrap_err();
     assert!(matches!(err, Error::UnexpectedEof { .. }));
 }
 
 /// Truncated tile data returns UnexpectedEof.
 #[test]
 fn td_truncated_tile_data() {
-    let mut data = build_td_tmp(1, 1, 1, 24, 24);
+    let mut data = build_td_tmp(24, 24, 1);
     data.truncate(data.len() - 1);
     let err = TdTmpFile::parse(&data).unwrap_err();
     assert!(matches!(err, Error::UnexpectedEof { .. }));
 }
 
-/// Zero tile dimensions with non-zero tile_count returns InvalidSize.
+/// Zero icon dimensions with non-zero count returns InvalidSize.
 ///
 /// Prevents division by zero and zero-area allocations.
 #[test]
 fn td_zero_tile_dimensions() {
-    let mut data = build_td_tmp(1, 1, 1, 24, 24);
-    // Set tile_w = 0.
-    data[8..10].copy_from_slice(&0u16.to_le_bytes());
+    let mut data = build_td_tmp(24, 24, 1);
+    // Set icon_width = 0.
+    data[0..2].copy_from_slice(&0u16.to_le_bytes());
     let err = TdTmpFile::parse(&data).unwrap_err();
     assert!(matches!(err, Error::InvalidSize { value: 0, .. }));
 }
@@ -193,7 +202,7 @@ fn td_zero_tile_dimensions() {
 /// Parsing the same input twice yields identical results.
 #[test]
 fn td_deterministic() {
-    let data = build_td_tmp(3, 2, 4, 24, 24);
+    let data = build_td_tmp(24, 24, 4);
     let a = TdTmpFile::parse(&data).unwrap();
     let b = TdTmpFile::parse(&data).unwrap();
     assert_eq!(a, b);
@@ -207,7 +216,7 @@ fn td_deterministic() {
 /// constrained systems.
 #[test]
 fn td_max_tile_count_accepted() {
-    let data = build_td_tmp(1, 1, 4096, 1, 1);
+    let data = build_td_tmp(1, 1, 4096);
     let tmp = TdTmpFile::parse(&data).unwrap();
     assert_eq!(tmp.tiles.len(), 4096);
 }
@@ -215,15 +224,11 @@ fn td_max_tile_count_accepted() {
 /// Tile count one past the V38 cap (4097) is rejected.
 #[test]
 fn td_over_max_tile_count_rejected() {
-    // We can't use build_td_tmp for 4097 tiles easily — just build a
-    // minimal header that claims 4097 tiles.
-    let mut data = vec![0u8; 20 + 1]; // header + 1 icon-map byte
-    data[0..2].copy_from_slice(&1u16.to_le_bytes()); // width=1
-    data[2..4].copy_from_slice(&1u16.to_le_bytes()); // height=1
-    data[4..6].copy_from_slice(&4097u16.to_le_bytes()); // tile_count=4097
+    let mut data = vec![0u8; TD_HEADER_SIZE];
+    data[0..2].copy_from_slice(&1u16.to_le_bytes()); // icon_width=1
+    data[2..4].copy_from_slice(&1u16.to_le_bytes()); // icon_height=1
+    data[4..6].copy_from_slice(&4097u16.to_le_bytes()); // count=4097
     data[6..8].copy_from_slice(&4097u16.to_le_bytes()); // allocated
-    data[8..10].copy_from_slice(&1u16.to_le_bytes()); // tile_w=1
-    data[10..12].copy_from_slice(&1u16.to_le_bytes()); // tile_h=1
     let err = TdTmpFile::parse(&data).unwrap_err();
     assert!(matches!(
         err,
@@ -237,19 +242,16 @@ fn td_over_max_tile_count_rejected() {
 
 // ─── TD integer overflow safety ──────────────────────────────────────────────
 
-/// Grid dimensions that would overflow `width * height` use saturating
-/// arithmetic and return an appropriate error instead of panicking.
+/// Icon dimensions that would overflow `icon_width * icon_height` use
+/// saturating arithmetic and return an appropriate error instead of panicking.
 #[test]
 fn td_grid_overflow_no_panic() {
-    let mut data = vec![0u8; 20];
-    data[0..2].copy_from_slice(&0xFFFFu16.to_le_bytes()); // width
-    data[2..4].copy_from_slice(&0xFFFFu16.to_le_bytes()); // height
-    data[4..6].copy_from_slice(&0u16.to_le_bytes()); // tile_count=0
-    data[8..10].copy_from_slice(&24u16.to_le_bytes());
-    data[10..12].copy_from_slice(&24u16.to_le_bytes());
-    // Icon map would need 0xFFFF * 0xFFFF bytes — way more than we have.
+    let mut data = vec![0u8; TD_HEADER_SIZE];
+    data[0..2].copy_from_slice(&0xFFFFu16.to_le_bytes()); // icon_width
+    data[2..4].copy_from_slice(&0xFFFFu16.to_le_bytes()); // icon_height
+    data[4..6].copy_from_slice(&1u16.to_le_bytes()); // count=1
     let err = TdTmpFile::parse(&data).unwrap_err();
-    assert!(matches!(err, Error::UnexpectedEof { .. }));
+    assert!(matches!(err, Error::InvalidSize { .. }));
 }
 
 // ─── RA basic functionality ──────────────────────────────────────────────────
@@ -437,7 +439,7 @@ fn td_error_display_includes_values() {
     let data = [0u8; 5];
     let err = TdTmpFile::parse(&data).unwrap_err();
     let msg = format!("{err}");
-    assert!(msg.contains("20"));
+    assert!(msg.contains("32"));
     assert!(msg.contains("5"));
 }
 
@@ -477,6 +479,92 @@ fn ra_non_divisible_dimensions() {
 /// All-zero TD input (exactly header size) must not panic.
 #[test]
 fn td_adversarial_all_zero_no_panic() {
-    let data = [0u8; 20];
+    let data = [0u8; 32];
     let _ = TdTmpFile::parse(&data);
+}
+
+/// All-zero RA input (header + some zero offset bytes) must not panic.
+///
+/// Why (V38): zero image_width, image_height, tile_width, tile_height
+/// exercises the zero-dimension path including division-by-zero guards.
+#[test]
+fn ra_adversarial_all_zero_no_panic() {
+    let data = [0u8; 256];
+    let _ = RaTmpFile::parse(&data);
+}
+
+// ─── RA integer overflow safety ──────────────────────────────────────────────
+
+/// RA header with near-`u32::MAX` dimensions must not panic.
+///
+/// Why: `image_width * image_height` or `cols * rows` could overflow
+/// without saturating arithmetic.  The parser must reject gracefully.
+#[test]
+fn ra_dimension_overflow_no_panic() {
+    let mut data = vec![0u8; 256];
+    // image_width = 0xFFFF_FFFF, image_height = 0xFFFF_FFFF
+    data[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+    data[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    // tile_width = 1, tile_height = 1 (to maximise cols * rows)
+    data[8..12].copy_from_slice(&1u32.to_le_bytes());
+    data[12..16].copy_from_slice(&1u32.to_le_bytes());
+    let err = RaTmpFile::parse(&data);
+    assert!(err.is_err());
+}
+
+// ── TD TMP encoder round-trip tests ─────────────────────────────────
+
+/// Encoding 2 tiles (24x24) then parsing the result recovers the original pixels.
+///
+/// Why: the encoder must produce a valid `IControl_Type` layout that the
+/// parser can read back.  Two tiles exercise the multi-tile offset and
+/// map-data paths.
+#[test]
+fn encode_td_tmp_round_trip() {
+    let tile0 = vec![0xAAu8; 24 * 24];
+    let tile1 = vec![0x55u8; 24 * 24];
+    let tiles: Vec<&[u8]> = vec![&tile0, &tile1];
+
+    let encoded = encode_td_tmp(&tiles, 24, 24).unwrap();
+    let parsed = TdTmpFile::parse(&encoded).unwrap();
+
+    assert_eq!(parsed.header.icon_width, 24);
+    assert_eq!(parsed.header.icon_height, 24);
+    assert_eq!(parsed.header.count, 2);
+    assert_eq!(parsed.tiles.len(), 2);
+    assert_eq!(parsed.tiles[0].pixels, &tile0[..]);
+    assert_eq!(parsed.tiles[1].pixels, &tile1[..]);
+}
+
+/// Encoding a single tile then parsing recovers the original pixels.
+///
+/// Why: a single-tile file is the minimum non-empty case.  The map data
+/// has exactly one entry and the icon offset table starts immediately.
+#[test]
+fn encode_td_tmp_single_tile() {
+    let tile = vec![0x42u8; 24 * 24];
+    let tiles: Vec<&[u8]> = vec![&tile];
+
+    let encoded = encode_td_tmp(&tiles, 24, 24).unwrap();
+    let parsed = TdTmpFile::parse(&encoded).unwrap();
+
+    assert_eq!(parsed.header.count, 1);
+    assert_eq!(parsed.tiles.len(), 1);
+    assert_eq!(parsed.tiles[0].pixels, &tile[..]);
+}
+
+/// Encoding zero tiles produces a valid empty TD TMP file.
+///
+/// Why: an empty icon set (count=0) is valid — the parser must accept
+/// the header-only output without tile or map data.
+#[test]
+fn encode_td_tmp_empty() {
+    let tiles: Vec<&[u8]> = vec![];
+
+    let encoded = encode_td_tmp(&tiles, 24, 24).unwrap();
+    let parsed = TdTmpFile::parse(&encoded).unwrap();
+
+    assert_eq!(parsed.header.count, 0);
+    assert_eq!(parsed.tiles.len(), 0);
+    assert!(parsed.map_data.is_empty());
 }

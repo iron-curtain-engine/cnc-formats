@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Copyright (c) 2025–present Iron Curtain contributors
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cross-compilation toolchain for Linux ARM64.
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build release binary
+        run: |
+          ${{ matrix.cross && 'cross' || 'cargo' }} build \
+            --release \
+            --target ${{ matrix.target }} \
+            --features cli,encrypted-mix,convert,miniyaml
+        shell: bash
+
+      # Package the binary into an archive.
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          BIN_NAME="cnc-formats"
+          ARCHIVE_NAME="${BIN_NAME}-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          cd target/${{ matrix.target }}/release
+          tar czf "../../../${ARCHIVE_NAME}" "${BIN_NAME}"
+          cd ../../..
+          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "$GITHUB_ENV"
+        shell: bash
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        run: |
+          $BinName = "cnc-formats.exe"
+          $ArchiveName = "cnc-formats-${env:GITHUB_REF_NAME}-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/$BinName" -DestinationPath $ArchiveName
+          echo "ARCHIVE_NAME=$ArchiveName" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ env.ARCHIVE_NAME }}
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*

@@ -10,18 +10,44 @@ keywords = ["cnc", "red-alert", "command-conquer", "parser", "gamedev"]
 categories = ["parser-implementations", "game-development"]
 authors = ["Iron Curtain contributors"]
 
-[features]
-default = ["encrypted-mix"]
-encrypted-mix = ["dep:blowfish"]
-miniyaml = []
-
 [[bin]]
-name = "miniyaml2yaml"
-path = "src/bin/miniyaml2yaml.rs"
-required-features = ["miniyaml"]
+name = "cncf"
+path = "src/bin/cnc-formats/main.rs"
+required-features = ["cli"]
 
 [dependencies]
+base64 = { version = "0.22", optional = true }
 blowfish = { version = "0.9", optional = true }
+clap = { version = "4.6.0", features = ["derive"], optional = true }
+gif = { version = "0.14.1", optional = true }
+hound = { version = "3.5", optional = true }
+midly = { version = "0.5", optional = true }
+png = { version = "0.18.1", optional = true }
+rustysynth = { version = "1.3", optional = true }
+sha2 = { version = "0.10", optional = true }
+strict-path = { version = "0.1.1", optional = true }
+
+[features]
+default = [
+    "encrypted-mix",
+    "cli",
+    "convert",
+    "miniyaml",
+    "midi",
+    "adl",
+    "xmi",
+    "transcribe",
+    "meg",
+]
+encrypted-mix = ["dep:blowfish", "dep:base64"]
+miniyaml = []
+midi = ["dep:midly", "dep:rustysynth"]
+adl = []
+xmi = ["midi"]
+transcribe = ["midi"]
+meg = []
+cli = ["dep:clap", "dep:strict-path", "dep:sha2"]
+convert = ["dep:png", "dep:hound", "dep:gif"]
 
 [dev-dependencies]
 

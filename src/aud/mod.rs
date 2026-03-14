@@ -232,7 +232,8 @@ impl AdpcmChannel {
     /// 4. Advance `step_index` by `IMA_INDEX_ADJ[nibble]`, clamped to 0–88.
     fn decode_nibble(&mut self, nibble: u8) -> i16 {
         let token = (nibble & 0x0F) as usize;
-        let step = IMA_STEP_TABLE[self.step_index];
+        // Safe via .get(): step_index is clamped to 0–88 (table has 89 entries).
+        let step = IMA_STEP_TABLE.get(self.step_index).copied().unwrap_or(7);
 
         // Reconstruct the signed difference from the 4-bit code.
         // The quantiser step is divided into 8 levels by the 3 magnitude bits.
@@ -256,7 +257,9 @@ impl AdpcmChannel {
         self.sample = (self.sample + diff).clamp(-32768, 32767);
 
         // Advance step index, clamped to valid table range.
-        self.step_index = ((self.step_index as i32) + IMA_INDEX_ADJ[token]).clamp(0, 88) as usize;
+        // Safe via .get(): token is nibble & 0x0F (0–15), table has 16 entries.
+        let adj = IMA_INDEX_ADJ.get(token).copied().unwrap_or(-1);
+        self.step_index = ((self.step_index as i32) + adj).clamp(0, 88) as usize;
 
         self.sample as i16
     }
@@ -336,5 +339,173 @@ pub fn decode_adpcm(compressed: &[u8], stereo: bool, max_samples: usize) -> Vec<
     samples
 }
 
+// ── ADPCM Encoder ────────────────────────────────────────────────────────────
+//
+// The encoder is the mathematical inverse of the decoder: given a PCM sample,
+// find the 4-bit nibble that minimises the reconstruction error, then update
+// the channel state identically to the decoder so encoder and decoder stay
+// in lockstep.
+//
+// This is a clean-room implementation based on the published IMA ADPCM
+// standard (1992).  The encoding algorithm is a well-known public procedure.
+
+impl AdpcmChannel {
+    /// Encodes a single PCM sample into a 4-bit ADPCM nibble.
+    ///
+    /// Updates internal state (sample, step_index) identically to
+    /// `decode_nibble` so encoder and decoder remain synchronized.
+    fn encode_nibble(&mut self, sample: i16) -> u8 {
+        let step = IMA_STEP_TABLE.get(self.step_index).copied().unwrap_or(7);
+        let diff = (sample as i32) - self.sample;
+
+        // Determine the sign bit and magnitude.
+        let sign = if diff < 0 { 1u8 } else { 0u8 };
+        let abs_diff = diff.unsigned_abs() as i32;
+
+        // Quantise: find the 3-bit magnitude that best represents abs_diff.
+        let mut nibble = 0u8;
+        let mut threshold = step;
+        if abs_diff >= threshold {
+            nibble |= 4;
+        }
+        if abs_diff
+            >= threshold
+                .wrapping_shr(1)
+                .wrapping_add(if nibble & 4 != 0 { step } else { 0 })
+        {
+            nibble |= 2;
+        }
+        // Recompute threshold for bit 0 based on bits already set.
+        threshold = step >> 3;
+        if nibble & 4 != 0 {
+            threshold += step;
+        }
+        if nibble & 2 != 0 {
+            threshold += step >> 1;
+        }
+        if abs_diff >= threshold + (step >> 2) {
+            nibble |= 1;
+        }
+
+        let token = nibble | (sign << 3);
+
+        // Reconstruct exactly as the decoder does to stay in sync.
+        let magnitude = (token & 0x07) as usize;
+        let mut recon = step >> 3;
+        if magnitude & 0x04 != 0 {
+            recon += step;
+        }
+        if magnitude & 0x02 != 0 {
+            recon += step >> 1;
+        }
+        if magnitude & 0x01 != 0 {
+            recon += step >> 2;
+        }
+        if token & 0x08 != 0 {
+            recon = -recon;
+        }
+        self.sample = (self.sample + recon).clamp(-32768, 32767);
+        let adj = IMA_INDEX_ADJ
+            .get((token & 0x0F) as usize)
+            .copied()
+            .unwrap_or(-1);
+        self.step_index = ((self.step_index as i32) + adj).clamp(0, 88) as usize;
+
+        token
+    }
+}
+
+/// Encodes PCM samples into Westwood IMA ADPCM compressed bytes.
+///
+/// This is the inverse of [`decode_adpcm`].  Each pair of output nibbles
+/// is packed into one byte (low nibble first, then high nibble).
+///
+/// For stereo, `samples` must be interleaved `[L, R, L, R, …]` and
+/// `sample_count` should match the total number of samples.
+pub fn encode_adpcm(samples: &[i16], stereo: bool) -> Vec<u8> {
+    let mut left = AdpcmChannel::default();
+    let mut right = AdpcmChannel::default();
+
+    if stereo {
+        // Stereo: group samples into L/R pairs, each channel produces one
+        // byte per pair of nibbles.  Matches the interleave pattern of the
+        // decoder: even bytes → left channel, odd bytes → right channel.
+        let mut out = Vec::with_capacity(samples.len());
+        // Process in groups of 4 samples: 2 left + 2 right nibbles = 2 bytes.
+        let mut i = 0;
+        while i + 3 < samples.len() {
+            // Two left-channel samples → one byte.
+            let lo_l = left.encode_nibble(samples.get(i).copied().unwrap_or(0));
+            let hi_l = left.encode_nibble(samples.get(i + 2).copied().unwrap_or(0));
+            out.push((hi_l << 4) | (lo_l & 0x0F));
+            // Two right-channel samples → one byte.
+            let lo_r = right.encode_nibble(samples.get(i + 1).copied().unwrap_or(0));
+            let hi_r = right.encode_nibble(samples.get(i + 3).copied().unwrap_or(0));
+            out.push((hi_r << 4) | (lo_r & 0x0F));
+            i += 4;
+        }
+        out
+    } else {
+        // Mono: every two samples produce one byte of ADPCM.
+        let mut out = Vec::with_capacity(samples.len().div_ceil(2));
+        let mut i = 0;
+        while i < samples.len() {
+            let lo = left.encode_nibble(samples.get(i).copied().unwrap_or(0));
+            let hi = if i + 1 < samples.len() {
+                left.encode_nibble(samples.get(i + 1).copied().unwrap_or(0))
+            } else {
+                0
+            };
+            out.push((hi << 4) | (lo & 0x0F));
+            i += 2;
+        }
+        out
+    }
+}
+
+/// Builds a complete AUD file from PCM samples.
+///
+/// Encodes the given PCM samples as Westwood IMA ADPCM and wraps them in a
+/// 12-byte AUD header.  The output is a valid AUD file that [`AudFile::parse`]
+/// can round-trip.
+///
+/// # Arguments
+///
+/// - `samples`: interleaved PCM samples (mono or stereo `[L, R, L, R, …]`).
+/// - `sample_rate`: playback rate in Hz (e.g. 22050).
+/// - `stereo`: whether the samples are stereo-interleaved.
+pub fn build_aud(samples: &[i16], sample_rate: u16, stereo: bool) -> Vec<u8> {
+    let compressed = encode_adpcm(samples, stereo);
+    let compressed_size = compressed.len() as u32;
+    // Uncompressed size: 2 bytes per sample (16-bit PCM).
+    let uncompressed_size = (samples.len() as u32).saturating_mul(2);
+    let flags = if stereo {
+        AUD_FLAG_STEREO | AUD_FLAG_16BIT
+    } else {
+        AUD_FLAG_16BIT
+    };
+
+    // AUD header: 12 bytes.
+    let mut out = Vec::with_capacity(12 + compressed.len());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&compressed_size.to_le_bytes());
+    out.extend_from_slice(&uncompressed_size.to_le_bytes());
+    out.push(flags);
+    out.push(SCOMP_WESTWOOD);
+    // Westwood AUD files use per-chunk framing: one chunk header (4 bytes)
+    // followed by the ADPCM data.  For simplicity, wrap all compressed
+    // data as a single chunk.
+    let chunk_compressed_size = compressed.len() as u16;
+    let chunk_uncompressed_size = (samples.len().saturating_mul(2)) as u16;
+    out.extend_from_slice(&chunk_compressed_size.to_le_bytes());
+    out.extend_from_slice(&chunk_uncompressed_size.to_le_bytes());
+    out.extend_from_slice(&compressed);
+
+    out
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_validation;

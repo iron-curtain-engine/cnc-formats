@@ -19,12 +19,12 @@
 //! Both variants share the concept of a rectangular grid of tiles, but differ
 //! in header layout and tile addressing.
 //!
-//! ## TD Layout
+//! ## TD Layout (`IControl_Type`)
 //!
 //! ```text
-//! [TdTmpHeader]       20 bytes
-//! [icon index]         width × height bytes  (maps grid position → tile ID)
-//! [tile data ...]      tile_count × (tile_w × tile_h) bytes
+//! [TdTmpHeader]       32 bytes  (IControl_Type: 4×i16 + 6×i32)
+//! [map data]           count bytes  (at Map offset)
+//! [tile pixel data]    count × (icon_width × icon_height) bytes  (at Icons offset)
 //! ```
 //!
 //! ## RA Layout
@@ -84,56 +84,82 @@ const MAX_TILE_AREA: usize = 1024 * 1024;
 // ─── TD Variant ──────────────────────────────────────────────────────────────
 
 /// Size of the Tiberian Dawn TMP header in bytes.
-const TD_HEADER_SIZE: usize = 20;
+///
+/// Matches the `IControl_Type` struct from `tiberiandawn/tile.h`:
+/// 4 × `int16_t` (8 bytes) + 6 × `int32_t` (24 bytes) = 32 bytes.
+const TD_HEADER_SIZE: usize = 32;
 
 /// Parsed header for a **Tiberian Dawn** TMP file.
 ///
-/// The header describes a grid of tiles.  `width` × `height` gives the grid
-/// dimensions (in tiles, not pixels).  `tile_count` is the number of distinct
-/// tile images stored in the file.
+/// Layout matches the `IControl_Type` struct from the original game source
+/// (`tiberiandawn/tile.h`).  The header describes an icon set: a collection
+/// of `count` tile images, each `icon_width × icon_height` pixels.
+///
+/// Grid dimensions (how tiles are arranged in a template) are NOT stored in
+/// this header — they come from the game's template database.  The `Map`
+/// offset points to a mapping table that the game uses with externally-known
+/// grid dimensions.
+///
+/// ```text
+/// Offset  Type     Field           Description
+/// 0       i16      Width           Icon pixel width (typically 24)
+/// 2       i16      Height          Icon pixel height (typically 24)
+/// 4       i16      Count           Number of icons in the set
+/// 6       i16      Allocated       Allocated icon slots
+/// 8       i32      Size            Total data size
+/// 12      i32      Icons           Offset to icon pixel data
+/// 16      i32      Palettes        Offset to palette data
+/// 20      i32      Remaps          Offset to remap tables
+/// 24      i32      TransFlag       Offset to transparency flags
+/// 28      i32      Map             Offset to icon map
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TdTmpHeader {
-    /// Grid width in tiles.
-    pub width: u16,
-    /// Grid height in tiles.
-    pub height: u16,
-    /// Number of distinct tile images stored in the file.
-    pub tile_count: u16,
-    /// Allocated tile slots (often == `tile_count`, used by the game engine).
+    /// Width of each icon in pixels (typically 24).
+    pub icon_width: u16,
+    /// Height of each icon in pixels (typically 24).
+    pub icon_height: u16,
+    /// Number of icons (tile images) in the set.
+    pub count: u16,
+    /// Allocated icon slots (often == `count`).
     pub allocated: u16,
-    /// Tile pixel width (typically 24).
-    pub tile_w: u16,
-    /// Tile pixel height (typically 24).
-    pub tile_h: u16,
-    /// File data size from header (informational, may not match actual size).
-    pub file_size: u32,
-    /// Image data offset — where tile pixel data begins.
-    pub image_start: u32,
-    /// Palette data offset (0 if no embedded palette).
-    pub palette_start: u32,
-    /// Flags field.
-    pub flags: u32,
+    /// Total data size of the icon set blob.
+    pub size: u32,
+    /// Byte offset to icon pixel data within the blob.
+    pub icons_offset: u32,
+    /// Byte offset to palette data (0 if unused).
+    pub palettes_offset: u32,
+    /// Byte offset to remap tables (0 if unused).
+    pub remaps_offset: u32,
+    /// Byte offset to transparency flag data (0 if unused).
+    pub trans_flag_offset: u32,
+    /// Byte offset to icon map data (0 if unused).
+    pub map_offset: u32,
 }
 
 /// A single tile image from a Tiberian Dawn TMP file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TdTmpTile<'a> {
-    /// Index of this tile in the icon map.
+    /// Sequential index of this tile in the icon set.
     pub index: u8,
-    /// Raw palette-indexed pixel data (tile_w × tile_h bytes).
+    /// Raw palette-indexed pixel data (`icon_width × icon_height` bytes).
     pub pixels: &'a [u8],
 }
 
 /// Parsed Tiberian Dawn TMP file.
 ///
-/// The `icon_map` maps each grid position (row-major, `width × height`) to a
-/// tile image index.  Actual tile image data is in `tiles`.
+/// The `map_data` contains the raw icon-map bytes from the `Map` offset
+/// in the header.  Its length is `count` bytes (one per icon slot).
+/// The game uses this with externally-known grid dimensions to map
+/// grid positions to icon images.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TdTmpFile<'a> {
-    /// File header.
+    /// File header (matches `IControl_Type`).
     pub header: TdTmpHeader,
-    /// Icon map: one byte per grid cell, mapping grid position to tile index.
-    pub icon_map: &'a [u8],
+    /// Raw icon-map data: `count` bytes from the `Map` offset.
+    /// Each byte maps an icon slot to a display position.
+    /// Empty if `map_offset` is 0.
+    pub map_data: &'a [u8],
     /// The distinct tile images stored in the file.
     pub tiles: Vec<TdTmpTile<'a>>,
 }
@@ -143,15 +169,16 @@ impl<'a> TdTmpFile<'a> {
     ///
     /// # Layout
     ///
-    /// The header (20 bytes) is followed by an icon map of `width × height`
-    /// bytes, then `tile_count` tile images each of `tile_w × tile_h` bytes.
+    /// The 32-byte `IControl_Type` header is followed by data sections at
+    /// the offsets specified by the header fields.  Icon pixel data starts
+    /// at `icons_offset`, and the icon map starts at `map_offset`.
     ///
     /// # Errors
     ///
     /// Returns errors for truncated input, zero dimensions, or tile counts
     /// that would exceed the V38 safety cap.
     pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
-        // ── Header ───────────────────────────────────────────────────────
+        // ── Header (32 bytes: 4 × i16 + 6 × i32) ────────────────────────
         if data.len() < TD_HEADER_SIZE {
             return Err(Error::UnexpectedEof {
                 needed: TD_HEADER_SIZE,
@@ -159,89 +186,91 @@ impl<'a> TdTmpFile<'a> {
             });
         }
 
-        let width = read_u16_le(data, 0)?;
-        let height = read_u16_le(data, 2)?;
-        let tile_count = read_u16_le(data, 4)?;
+        let icon_width = read_u16_le(data, 0)?;
+        let icon_height = read_u16_le(data, 2)?;
+        let count = read_u16_le(data, 4)?;
         let allocated = read_u16_le(data, 6)?;
-        let tile_w = read_u16_le(data, 8)?;
-        let tile_h = read_u16_le(data, 10)?;
-        let file_size = read_u32_le(data, 12)?;
-        let image_start = read_u32_le(data, 16)?;
+        let size = read_u32_le(data, 8)?;
+        let icons_offset = read_u32_le(data, 12)?;
+        let palettes_offset = read_u32_le(data, 16)?;
+        let remaps_offset = read_u32_le(data, 20)?;
+        let trans_flag_offset = read_u32_le(data, 24)?;
+        let map_offset = read_u32_le(data, 28)?;
 
-        // TD header has additional fields for palette and flags, but many
-        // files only have the core 20 bytes.  We default the rest to zero.
-        let palette_start = 0u32;
-        let flags = 0u32;
-
-        // V38: validate dimensions are non-zero when tile_count > 0.
-        if tile_count > 0 && (tile_w == 0 || tile_h == 0) {
+        // V38: validate icon dimensions are non-zero when count > 0.
+        if count > 0 && (icon_width == 0 || icon_height == 0) {
             return Err(Error::InvalidSize {
                 value: 0,
                 limit: 1,
-                context: "TD TMP tile dimensions must be non-zero",
+                context: "TD TMP icon dimensions must be non-zero",
             });
         }
 
         // V38: cap tile count.
-        if (tile_count as usize) > MAX_TILE_COUNT {
+        if (count as usize) > MAX_TILE_COUNT {
             return Err(Error::InvalidSize {
-                value: tile_count as usize,
+                value: count as usize,
                 limit: MAX_TILE_COUNT,
                 context: "TD TMP tile count",
             });
         }
 
         // V38: cap tile pixel area.
-        let tile_area = (tile_w as usize).saturating_mul(tile_h as usize);
-        if tile_area > MAX_TILE_AREA {
+        let icon_area = (icon_width as usize).saturating_mul(icon_height as usize);
+        if icon_area > MAX_TILE_AREA {
             return Err(Error::InvalidSize {
-                value: tile_area,
+                value: icon_area,
                 limit: MAX_TILE_AREA,
                 context: "TD TMP tile area",
             });
         }
 
         let header = TdTmpHeader {
-            width,
-            height,
-            tile_count,
+            icon_width,
+            icon_height,
+            count,
             allocated,
-            tile_w,
-            tile_h,
-            file_size,
-            image_start,
-            palette_start,
-            flags,
+            size,
+            icons_offset,
+            palettes_offset,
+            remaps_offset,
+            trans_flag_offset,
+            map_offset,
         };
 
-        // ── Icon Map ─────────────────────────────────────────────────────
-        let grid_size = (width as usize).saturating_mul(height as usize);
-        let map_start = TD_HEADER_SIZE;
-        let map_end = map_start.saturating_add(grid_size);
-        let icon_map = data.get(map_start..map_end).ok_or(Error::UnexpectedEof {
-            needed: map_end,
-            available: data.len(),
-        })?;
+        // ── Map Data ─────────────────────────────────────────────────────
+        // The Map offset points to an array of `count` bytes.  Each byte
+        // maps an icon slot to a display position in the template grid.
+        // Grid dimensions are external (from the game's template database).
+        let map_data = if map_offset > 0 {
+            let ms = map_offset as usize;
+            let me = ms.saturating_add(count as usize);
+            data.get(ms..me).ok_or(Error::UnexpectedEof {
+                needed: me,
+                available: data.len(),
+            })?
+        } else {
+            &[] as &[u8]
+        };
 
         // ── Tile Data ────────────────────────────────────────────────────
-        // Use image_start if non-zero, otherwise tiles immediately follow
-        // the icon map.
-        let tiles_offset = if image_start > 0 {
-            image_start as usize
+        // Use icons_offset if non-zero, otherwise tiles start right after
+        // the header.
+        let tiles_start = if icons_offset > 0 {
+            icons_offset as usize
         } else {
-            map_end
+            TD_HEADER_SIZE
         };
 
-        let tc = tile_count as usize;
+        let tc = count as usize;
         let mut tiles = Vec::with_capacity(tc);
         for i in 0..tc {
-            let tile_start = tiles_offset.saturating_add(i.saturating_mul(tile_area));
-            let tile_end = tile_start.saturating_add(tile_area);
+            let tile_start = tiles_start.saturating_add(i.saturating_mul(icon_area));
+            let tile_end = tile_start.saturating_add(icon_area);
             let pixels = data.get(tile_start..tile_end).ok_or(Error::UnexpectedEof {
                 needed: tile_end,
                 available: data.len(),
             })?;
-            // The icon map index for this tile is its sequential position.
             tiles.push(TdTmpTile {
                 index: i as u8,
                 pixels,
@@ -250,7 +279,7 @@ impl<'a> TdTmpFile<'a> {
 
         Ok(TdTmpFile {
             header,
-            icon_map,
+            map_data,
             tiles,
         })
     }
@@ -427,6 +456,133 @@ impl<'a> RaTmpFile<'a> {
 
         Ok(RaTmpFile { header, tiles })
     }
+}
+
+// ── TMP TD Encoder ───────────────────────────────────────────────────────────
+//
+// Builds a valid Tiberian Dawn TMP file from palette-indexed tile pixels.
+// The layout matches `IControl_Type` — the simplest terrain tile format in
+// the C&C franchise.
+
+/// Encodes palette-indexed tiles into a complete TD TMP file.
+///
+/// Each tile in `tiles` must be exactly `tile_width × tile_height` bytes of
+/// palette-indexed pixel data.  The output is a valid TD TMP file that
+/// [`TdTmpFile::parse`] can round-trip.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidSize`] if any tile has the wrong pixel count.
+pub fn encode_td_tmp(tiles: &[&[u8]], tile_width: u16, tile_height: u16) -> Result<Vec<u8>, Error> {
+    let tile_area = (tile_width as usize).saturating_mul(tile_height as usize);
+    for tile in tiles {
+        if tile.len() != tile_area {
+            return Err(Error::InvalidSize {
+                value: tile.len(),
+                limit: tile_area,
+                context: "TD TMP tile pixel count mismatch",
+            });
+        }
+    }
+
+    let count = tiles.len() as u16;
+    let map_start = TD_HEADER_SIZE;
+    let map_size = count as usize;
+    let icons_start = map_start + map_size;
+    let total = icons_start + (count as usize) * tile_area;
+
+    // Buffer is pre-sized to `total` — all writes below are within bounds
+    // by construction.  The `buf_len` binding avoids borrow-checker conflicts
+    // between `.get_mut()` and error-context calls.
+    let mut buf = vec![0u8; total];
+    let buf_len = buf.len();
+
+    // IControl_Type header (32 bytes).
+    let eof = |needed| Error::UnexpectedEof {
+        needed,
+        available: buf_len,
+    };
+
+    buf.get_mut(0..2)
+        .ok_or(eof(2))?
+        .copy_from_slice(&tile_width.to_le_bytes());
+    buf.get_mut(2..4)
+        .ok_or(eof(4))?
+        .copy_from_slice(&tile_height.to_le_bytes());
+    buf.get_mut(4..6)
+        .ok_or(eof(6))?
+        .copy_from_slice(&count.to_le_bytes());
+    buf.get_mut(6..8)
+        .ok_or(eof(8))?
+        .copy_from_slice(&count.to_le_bytes());
+    buf.get_mut(8..12)
+        .ok_or(eof(12))?
+        .copy_from_slice(&(total as u32).to_le_bytes());
+    buf.get_mut(12..16)
+        .ok_or(eof(16))?
+        .copy_from_slice(&(icons_start as u32).to_le_bytes());
+    // palettes_offset, remaps_offset, trans_flag_offset: 0 (already zeroed).
+    buf.get_mut(28..32)
+        .ok_or(eof(32))?
+        .copy_from_slice(&(map_start as u32).to_le_bytes());
+
+    // Map data: sequential tile indices.
+    for i in 0..map_size {
+        if let Some(slot) = buf.get_mut(map_start + i) {
+            *slot = i as u8;
+        }
+    }
+
+    // Tile pixel data.
+    for (t, tile) in tiles.iter().enumerate() {
+        let start = icons_start + t * tile_area;
+        if let Some(dest) = buf.get_mut(start..start + tile_area) {
+            dest.copy_from_slice(tile);
+        }
+    }
+
+    Ok(buf)
+}
+
+/// Builds a minimal 4×4, 2-tile TD TMP for cross-module testing.
+#[cfg(all(test, feature = "convert"))]
+pub(crate) fn build_td_test_tmp() -> Vec<u8> {
+    let iw: u16 = 4;
+    let ih: u16 = 4;
+    let count: u16 = 2;
+    let icon_area = (iw as usize) * (ih as usize);
+    let map_start = TD_HEADER_SIZE;
+    let map_size = count as usize;
+    let icons_start = map_start + map_size;
+    let total = icons_start + (count as usize) * icon_area;
+    let mut buf = vec![0u8; total];
+
+    // IControl_Type header (32 bytes).
+    buf[0..2].copy_from_slice(&iw.to_le_bytes());
+    buf[2..4].copy_from_slice(&ih.to_le_bytes());
+    buf[4..6].copy_from_slice(&count.to_le_bytes());
+    buf[6..8].copy_from_slice(&count.to_le_bytes());
+    buf[8..12].copy_from_slice(&(total as u32).to_le_bytes());
+    buf[12..16].copy_from_slice(&(icons_start as u32).to_le_bytes());
+    buf[16..20].copy_from_slice(&0u32.to_le_bytes());
+    buf[20..24].copy_from_slice(&0u32.to_le_bytes());
+    buf[24..28].copy_from_slice(&0u32.to_le_bytes());
+    buf[28..32].copy_from_slice(&(map_start as u32).to_le_bytes());
+
+    // Map data: sequential indices.
+    for i in 0..map_size {
+        buf[map_start + i] = i as u8;
+    }
+
+    // Tile pixel data: each tile filled with its index value.
+    for t in 0..count as usize {
+        let start = icons_start + t * icon_area;
+        for p in 0..icon_area {
+            buf[start + p] = t as u8;
+        }
+    }
+
+    buf
 }
 
 #[cfg(test)]

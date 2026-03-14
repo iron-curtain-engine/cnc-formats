@@ -12,18 +12,23 @@
 //! | [`pal`]         | `.pal` | 256-color 6-bit VGA palette              |
 //! | [`shp`]         | `.shp` | Keyframe sprite animation frames         |
 //! | [`aud`]         | `.aud` | Westwood IMA ADPCM audio                 |
-//! | [`lcw`]         | —      | LCW decompression used by SHP/VQA/TMP    |
+//! | [`lcw`]         | —      | LCW decompression used by SHP/VQA/WSA    |
 //! | [`tmp`]         | `.tmp` | Terrain tile sets (TD + RA variants)     |
 //! | [`vqa`]         | `.vqa` | VQ video container (IFF chunk-based)     |
 //! | [`wsa`]         | `.wsa` | LCW + XOR-delta animation                |
-//! | [`fnt`]         | `.fnt` | Bitmap fonts (256-glyph fixed-height)    |
+//! | [`fnt`]         | `.fnt` | Bitmap fonts (variable character count)   |
 //! | [`ini`]         | `.ini` | Classic C&C rules file parser             |
 //!
-//! Feature-gated (requires `miniyaml` feature):
+//! Feature-gated:
 //!
-//! | Module          | Format   | Description                              |
-//! |-----------------|----------|------------------------------------------|
-//! | [`miniyaml`]    | MiniYAML | OpenRA configuration file parser          |
+//! | Module          | Feature    | Format   | Description                        |
+//! |-----------------|------------|----------|------------------------------------|
+//! | [`miniyaml`]    | `miniyaml` | MiniYAML | OpenRA configuration file parser   |
+//! | [`mid`]         | `midi`     | `.mid`   | Standard MIDI file parser/writer   |
+//! | [`adl`]         | `adl`      | `.adl`   | AdLib OPL2 music parser (Dune II)  |
+//! | [`xmi`]         | `xmi`      | `.xmi`   | XMIDI parser + XMI→MID converter   |
+//! | [`transcribe`]  | `transcribe`| —       | PCM→MIDI transcription (YIN pitch) |
+//! | [`meg`]         | `meg`      | `.meg`   | Petroglyph MEG/PGM archive parser  |
 //!
 //! ## Clean-Room Design
 //!
@@ -48,6 +53,8 @@
 // only on `error` and `lcw`; there are no circular dependencies.
 
 pub mod aud;
+#[cfg(feature = "convert")]
+pub mod convert;
 pub mod error;
 pub mod fnt;
 pub mod ini;
@@ -58,12 +65,29 @@ pub mod mix_crypt;
 pub mod pal;
 pub(crate) mod read;
 pub mod shp;
+/// Format detection by content inspection (magic-byte sniffing).
+pub mod sniff;
 pub mod tmp;
 pub mod vqa;
 pub mod wsa;
 
 #[cfg(feature = "miniyaml")]
 pub mod miniyaml;
+
+#[cfg(feature = "midi")]
+pub mod mid;
+
+#[cfg(feature = "adl")]
+pub mod adl;
+
+#[cfg(feature = "xmi")]
+pub mod xmi;
+
+#[cfg(feature = "transcribe")]
+pub mod transcribe;
+
+#[cfg(feature = "meg")]
+pub mod meg;
 
 // Re-export `Error` at the crate root so callers can write `cnc_formats::Error`
 // without descending into the `error` module.

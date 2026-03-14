@@ -29,8 +29,10 @@ fn build_wsa(num_frames: u16, width: u16, height: u16, has_loop: bool) -> Vec<u8
     buf[4..6].copy_from_slice(&0u16.to_le_bytes()); // y
     buf[6..8].copy_from_slice(&width.to_le_bytes());
     buf[8..10].copy_from_slice(&height.to_le_bytes());
-    let buf_size = (width as u32) * (height as u32);
-    buf[10..14].copy_from_slice(&buf_size.to_le_bytes());
+    // largest_frame_size (u16) at offset 10 — dummy value.
+    buf[10..12].copy_from_slice(&(frame_payload_size as u16).to_le_bytes());
+    // flags (u16) at offset 12 — 0 = no embedded palette.
+    buf[12..14].copy_from_slice(&0u16.to_le_bytes());
 
     // ── Offset table ──
     // Offsets are relative to the data area (after header + offset table).
@@ -75,7 +77,9 @@ fn parse_basic() {
     assert_eq!(wsa.header.num_frames, 3);
     assert_eq!(wsa.header.width, 320);
     assert_eq!(wsa.header.height, 200);
-    assert_eq!(wsa.header.buffer_size, 64000);
+    assert_eq!(wsa.header.largest_frame_size, 2);
+    assert_eq!(wsa.header.flags, 0);
+    assert!(!wsa.header.has_embedded_palette());
     assert_eq!(wsa.frames.len(), 3);
     assert!(!wsa.has_loop_frame);
     // Each frame has 2 bytes of dummy data.
@@ -203,6 +207,17 @@ fn error_display_includes_values() {
 
 // ─── Integer overflow safety ─────────────────────────────────────────────────
 
+/// WSA file with exactly MAX_FRAME_COUNT (8192) frames succeeds.
+///
+/// Why: boundary complement to `over_max_frame_count` (8193 rejected).
+/// Verifies that the exact cap value is accepted.
+#[test]
+fn at_max_frame_count_accepted() {
+    let data = build_wsa(8192, 1, 1, false);
+    let wsa = WsaFile::parse(&data).unwrap();
+    assert_eq!(wsa.header.num_frames, 8192);
+}
+
 /// Offset table size that would overflow uses saturating arithmetic and
 /// returns an error instead of panicking.
 #[test]
@@ -247,7 +262,7 @@ fn adversarial_all_zero_no_panic() {
 ///
 /// Why: a crafted file where offset[0] == offset[1] creates a zero-length
 /// frame, which is valid.  But offset[n] pointing backward could confuse
-/// naÃ¯ve parsers.
+/// naïve parsers.
 #[test]
 fn adversarial_self_referencing_offsets() {
     let mut data = build_wsa(2, 8, 8, false);
@@ -258,4 +273,218 @@ fn adversarial_self_referencing_offsets() {
         data[pos..pos + 4].copy_from_slice(&offset_val.to_le_bytes());
     }
     let _ = WsaFile::parse(&data);
+}
+
+// ── decode_frames ────────────────────────────────────────────────────────────
+
+/// Builds a WSA file with real LCW-compressed XOR-delta frames.
+///
+/// Frame 0: LCW fill of `pixel_count` bytes with value `0xAA`.
+/// Frame 1: LCW fill of `pixel_count` bytes with XOR-delta `0x11` (so
+///   frame 1 result = `0xAA ^ 0x11 = 0xBB`).
+fn build_wsa_lcw(width: u16, height: u16) -> Vec<u8> {
+    let pixel_count = (width as usize) * (height as usize);
+    // LCW fill command: 0xFE, count_lo, count_hi, value, 0x80 (end).
+    let lcw_frame0 = [
+        0xFEu8,
+        pixel_count as u8,
+        (pixel_count >> 8) as u8,
+        0xAA,
+        0x80,
+    ];
+    let lcw_frame1 = [
+        0xFEu8,
+        pixel_count as u8,
+        (pixel_count >> 8) as u8,
+        0x11,
+        0x80,
+    ];
+
+    let num_frames: u16 = 2;
+    let num_offsets = (num_frames as usize) + 2;
+    let offsets_size = num_offsets * 4;
+    let header_and_offsets = 14 + offsets_size;
+
+    let total = header_and_offsets + lcw_frame0.len() + lcw_frame1.len();
+    let mut buf = vec![0u8; total];
+
+    // Header.
+    buf[0..2].copy_from_slice(&num_frames.to_le_bytes());
+    buf[6..8].copy_from_slice(&width.to_le_bytes());
+    buf[8..10].copy_from_slice(&height.to_le_bytes());
+
+    // Offset table (relative to data base = header_and_offsets).
+    let off0 = 0u32;
+    let off1 = lcw_frame0.len() as u32;
+    let off_sentinel = off1 + lcw_frame1.len() as u32;
+    let ot = 14;
+    buf[ot..ot + 4].copy_from_slice(&off0.to_le_bytes());
+    buf[ot + 4..ot + 8].copy_from_slice(&off1.to_le_bytes());
+    buf[ot + 8..ot + 12].copy_from_slice(&off_sentinel.to_le_bytes());
+    // Loop offset = 0 (no loop).
+
+    // Frame data.
+    buf[header_and_offsets..header_and_offsets + lcw_frame0.len()].copy_from_slice(&lcw_frame0);
+    buf[header_and_offsets + lcw_frame0.len()..].copy_from_slice(&lcw_frame1);
+
+    buf
+}
+
+/// `decode_frames` decodes XOR-delta chain correctly.
+///
+/// Why: WSA frames are XOR-deltas from a zero canvas.  Frame 0 fills
+/// with 0xAA, frame 1's delta of 0x11 XOR'd onto 0xAA gives 0xBB.
+#[test]
+fn decode_frames_xor_delta_chain() {
+    let data = build_wsa_lcw(2, 2);
+    let wsa = WsaFile::parse(&data).unwrap();
+    let frames = wsa.decode_frames().unwrap();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0], vec![0xAAu8; 4]);
+    assert_eq!(frames[1], vec![0xBBu8; 4]);
+}
+
+/// `decode_frames` on a zero-frame WSA returns empty vec.
+#[test]
+fn decode_frames_empty() {
+    let data = build_wsa(0, 4, 4, false);
+    let wsa = WsaFile::parse(&data).unwrap();
+    let frames = wsa.decode_frames().unwrap();
+    assert!(frames.is_empty());
+}
+
+/// WSA with a loop frame has `has_loop_frame` set and loop delta data is present.
+///
+/// Why: the loop-back delta (at offsets[num_frames]..offsets[num_frames+1])
+/// allows seamless animation looping.  If `offsets[num_frames+1] != 0` the
+/// parser must report `has_loop_frame = true`.  A bug that misread the
+/// sentinel offset or off-by-one in the offset table index would silently
+/// drop loop support.
+///
+/// How: builds a 1-frame WSA with real LCW data and an additional loop delta
+/// occupying space after the normal frame.  Verifies `has_loop_frame` is
+/// true, the normal frame decodes correctly, and the file parses without
+/// error despite the extra data region.
+#[test]
+fn parse_loop_frame_present() {
+    let width: u16 = 2;
+    let height: u16 = 2;
+    let pixel_count = (width as usize) * (height as usize);
+
+    // LCW fill command: 0xFE, count_lo, count_hi, value, 0x80 (end).
+    let lcw_frame0 = [
+        0xFEu8,
+        pixel_count as u8,
+        (pixel_count >> 8) as u8,
+        0xAA,
+        0x80,
+    ];
+    // Loop delta: LCW fill with 0x55 (XOR'd onto frame 0 would give 0xFF).
+    let lcw_loop = [
+        0xFEu8,
+        pixel_count as u8,
+        (pixel_count >> 8) as u8,
+        0x55,
+        0x80,
+    ];
+
+    let num_frames: u16 = 1;
+    let num_offsets = (num_frames as usize) + 2;
+    let offsets_size = num_offsets * 4;
+    let header_and_offsets = WSA_HEADER_SIZE + offsets_size;
+    let total = header_and_offsets + lcw_frame0.len() + lcw_loop.len();
+    let mut buf = vec![0u8; total];
+
+    // Header (14 bytes).
+    buf[0..2].copy_from_slice(&num_frames.to_le_bytes());
+    buf[6..8].copy_from_slice(&width.to_le_bytes());
+    buf[8..10].copy_from_slice(&height.to_le_bytes());
+
+    // Offset table (relative to data base = header_and_offsets).
+    // offsets[0] = 0 (frame 0 start)
+    // offsets[1] = len(frame0) (loop delta start, also bounds frame 0)
+    // offsets[2] = len(frame0) + len(loop) (end-of-data sentinel, non-zero → has loop)
+    let ot = WSA_HEADER_SIZE;
+    let off0 = 0u32;
+    let off1 = lcw_frame0.len() as u32;
+    let off2 = off1 + lcw_loop.len() as u32;
+    buf[ot..ot + 4].copy_from_slice(&off0.to_le_bytes());
+    buf[ot + 4..ot + 8].copy_from_slice(&off1.to_le_bytes());
+    buf[ot + 8..ot + 12].copy_from_slice(&off2.to_le_bytes());
+
+    // Frame data.
+    buf[header_and_offsets..header_and_offsets + lcw_frame0.len()].copy_from_slice(&lcw_frame0);
+    buf[header_and_offsets + lcw_frame0.len()..].copy_from_slice(&lcw_loop);
+
+    let wsa = WsaFile::parse(&buf).unwrap();
+    assert!(wsa.has_loop_frame, "loop frame sentinel is non-zero");
+    assert_eq!(wsa.frames.len(), 1);
+
+    // Verify the normal frame decodes correctly.
+    let decoded = wsa.decode_frames().unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0], vec![0xAAu8; pixel_count]);
+}
+
+// ── WSA encoder round-trip tests ────────────────────────────────────
+
+/// Encoding 2 frames then parsing and decoding recovers the original pixels.
+///
+/// Why: the encoder must produce valid LCW-compressed XOR-deltas that the
+/// parser can read and `decode_frames` can decompress.  Two frames exercise
+/// the delta-chain: frame 0 is XOR'd against a zero canvas, frame 1 is
+/// XOR'd against frame 0.
+#[test]
+fn encode_frames_round_trip() {
+    let frame0 = vec![0xAAu8; 4 * 4];
+    let mut frame1 = vec![0xBBu8; 4 * 4];
+    // Make the frames distinct to exercise a non-trivial delta.
+    frame1[0] = 0xCC;
+
+    let frames: Vec<&[u8]> = vec![&frame0, &frame1];
+    let encoded = encode_frames(&frames, 4, 4).unwrap();
+
+    let wsa = WsaFile::parse(&encoded).unwrap();
+    assert_eq!(wsa.header.num_frames, 2);
+    assert_eq!(wsa.header.width, 4);
+    assert_eq!(wsa.header.height, 4);
+
+    let decoded = wsa.decode_frames().unwrap();
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0], frame0);
+    assert_eq!(decoded[1], frame1);
+}
+
+/// Encoding a single frame then parsing and decoding recovers the pixels.
+///
+/// Why: a single frame is the minimum non-empty WSA.  Its delta is simply
+/// XOR against the zero canvas (i.e., the raw pixel data itself).
+#[test]
+fn encode_frames_single_frame() {
+    let frame = vec![0x42u8; 4 * 4];
+    let frames: Vec<&[u8]> = vec![&frame];
+
+    let encoded = encode_frames(&frames, 4, 4).unwrap();
+
+    let wsa = WsaFile::parse(&encoded).unwrap();
+    assert_eq!(wsa.header.num_frames, 1);
+
+    let decoded = wsa.decode_frames().unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0], frame);
+}
+
+/// Encoding zero frames produces a valid empty WSA file.
+///
+/// Why: a zero-frame WSA is degenerate but valid.  The encoder must emit
+/// a header and offset table that the parser accepts.
+#[test]
+fn encode_frames_empty() {
+    let frames: Vec<&[u8]> = vec![];
+
+    let encoded = encode_frames(&frames, 4, 4).unwrap();
+
+    let wsa = WsaFile::parse(&encoded).unwrap();
+    assert_eq!(wsa.header.num_frames, 0);
+    assert_eq!(wsa.frames.len(), 0);
 }
