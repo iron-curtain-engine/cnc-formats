@@ -7,7 +7,8 @@
 [![No GPL](https://img.shields.io/badge/no_GPL_deps-enforced-brightgreen.svg)](deny.toml)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
-Clean-room binary format parsers for Command & Conquer game files.
+Clean-room binary format parsers for Command & Conquer game files, plus the
+`cncf` command-line utility.
 
 Parses `.mix` archives, `.shp` sprites, `.pal` palettes, `.aud` audio,
 `.vqa` video, `.tmp` terrain tiles, `.wsa` animations, `.fnt` bitmap fonts,
@@ -17,7 +18,7 @@ XMIDI, PCM-to-MIDI transcription, and Petroglyph MEG/PGM archive support.
 
 ## Status
 
-> **Pre-1.0** — all format modules are implemented and tested.
+> **Alpha / pre-1.0** — all format modules are implemented and tested.
 > The API may change before 1.0 as the Iron Curtain engine matures.
 
 ## Modules
@@ -35,6 +36,7 @@ XMIDI, PCM-to-MIDI transcription, and Petroglyph MEG/PGM archive support.
 | `fnt`       | `.fnt` | Bitmap fonts (variable character count, 4bpp nibble-packed)                     |
 | `ini`       | `.ini` | Classic C&C rules file parser                                                   |
 | `mix_crypt` | —      | Blowfish key derivation for encrypted `.mix` (requires `encrypted-mix` feature) |
+| `sniff`     | —      | Content-based format detection (`sniff::sniff_format`)                          |
 
 ### Feature-gated modules
 
@@ -44,23 +46,53 @@ XMIDI, PCM-to-MIDI transcription, and Petroglyph MEG/PGM archive support.
 | `mid`        | `.mid`      | Standard MIDI file parser/writer (`midi` feature)                  |
 | `adl`        | `.adl`      | AdLib OPL2 music parser (`adl` feature)                            |
 | `xmi`        | `.xmi`      | XMIDI parser + XMI→MID converter (`xmi` feature)                   |
-| `transcribe` | WAV→MIDI    | PCM audio transcription pipeline (`transcribe` feature)            |
+| `transcribe` | WAV→MIDI    | PCM/WAV transcription helpers and MIDI/XMI generation              |
 | `meg`        | `.meg/.pgm` | Petroglyph archive parser (`meg` feature)                          |
-| `convert`    | PNG/GIF/etc | Import/export codecs and AVI container support (`convert` feature) |
+| `convert`    | PNG/GIF/etc | Import/export codecs re-exported from `cnc_formats::convert::*`    |
+
+## Core Library API
+
+Most modules follow the same pattern: parse from `&[u8]`, inspect the parsed
+structure, then optionally run helper conversion or rendering APIs.
+
+### Always available
+
+| Area | Primary APIs |
+| ---- | ------------ |
+| Error handling | `cnc_formats::Error` re-exported at the crate root |
+| Format detection | `sniff::sniff_format(&[u8]) -> Option<&'static str>` |
+| MIX archives | `mix::crc`, `mix::builtin_name_map`, `mix::MixArchive::parse`, `get`, `get_by_crc`, `entries`, `file_count` |
+| AUD audio | `aud::AudFile::parse`, `aud::decode_adpcm`, `aud::encode_adpcm`, `aud::build_aud` |
+| LCW codec | `lcw::decompress`, `lcw::compress` |
+| SHP / WSA / TMP | `shp::ShpFile::parse`, `shp::encode_frames`, `wsa::WsaFile::parse`, `wsa::encode_frames`, `tmp::TdTmpFile::parse`, `tmp::RaTmpFile::parse`, `tmp::encode_td_tmp` |
+| PAL / FNT / INI | `pal::Palette::parse`, `fnt::FntFile::parse`, `ini::IniFile::parse` |
+| VQA | `vqa::VqaFile::parse`, `VqaFile::decode_frames`, `VqaFile::extract_audio` |
+
+### Feature-gated APIs
+
+| Feature | Primary APIs |
+| ------- | ------------ |
+| `convert` | `convert::shp_frames_to_png`, `png_to_shp`, `aud_to_wav`, `wav_to_aud`, `vqa_to_avi`, `avi_to_vqa`, `decode_avi`, `encode_avi` |
+| `miniyaml` | `miniyaml::MiniYamlDoc::parse`, `MiniYamlDoc::parse_str`, `miniyaml::to_yaml` |
+| `midi` | `mid::MidFile::parse`, `mid::write`, `mid::load_soundfont`, `mid::render_to_pcm`, `mid::render_to_wav` |
+| `adl` | `adl::AdlFile::parse`, `AdlFile::total_register_writes`, `AdlFile::estimated_duration_secs` |
+| `xmi` | `xmi::XmiFile::parse`, `XmiFile::sequence_count`, `xmi::to_mid` |
+| `transcribe` | `transcribe::TranscribeConfig`, `pcm_to_notes`, `pcm_to_mid`, `notes_to_mid`, `wav_to_mid`, `wav_to_xmi`, `mid_to_xmi` |
+| `meg` | `meg::MegArchive::parse`, `get`, `get_by_index`, `entries`, `file_count` |
 
 ### CLI tool
 
-The `cnc-formats` binary provides seven subcommands:
+The `cncf` binary provides seven subcommands:
 
 ```text
-cnc-formats validate <file>                                  # Parse and report structural validity
-cnc-formats inspect  <file>                                  # Dump metadata (entries, dimensions, etc.)
-cnc-formats list     <file>                                  # List archive entries
-cnc-formats extract  <file>                                  # Extract archive entries to individual files
-cnc-formats convert  <file> --format miniyaml --to yaml      # .yaml is ambiguous — explicit --format
-cnc-formats convert  rules.miniyaml --to yaml                # .miniyaml auto-detects
-cnc-formats check    <file>                                  # Deep structural integrity verification
-cnc-formats fingerprint <file>                               # SHA-256 of raw file bytes
+cncf validate <file>                                  # Parse and report structural validity
+cncf inspect  <file>                                  # Dump metadata (entries, dimensions, etc.)
+cncf list     <file>                                  # List archive entries
+cncf extract  <file>                                  # Extract archive entries to individual files
+cncf convert  <file> --format miniyaml --to yaml      # .yaml is ambiguous — explicit --format
+cncf convert  rules.miniyaml --to yaml                # .miniyaml auto-detects
+cncf check    <file>                                  # Deep structural integrity verification
+cncf fingerprint <file>                               # SHA-256 of raw file bytes
 ```
 
 `validate` and `inspect` work on all formats.  `list` and `extract` operate
@@ -120,10 +152,14 @@ see the `ra-formats` crate in the [Iron Curtain engine](https://github.com/iron-
 ## Usage
 
 ```rust
-use cnc_formats::{mix, pal, shp};
+use cnc_formats::{mix, pal, shp, sniff};
 
 // Parse a MIX archive from a byte slice
 let archive = mix::MixArchive::parse(&mix_data)?;
+
+// Or sniff the file type first when the extension is missing.
+let guessed = sniff::sniff_format(&mix_data);
+assert_eq!(guessed, Some("mix"));
 
 // Look up a file by name
 if let Some(entry_data) = archive.get("palette.pal") {
@@ -141,6 +177,16 @@ if let Some(frame) = shp_file.frames.first() {
     let pixels = frame.pixels(pixel_count)?; // LCW-decompressed pixel data
 }
 ```
+
+Feature-gated examples:
+
+- `midi`: parse and inspect with `mid::MidFile::parse`, then render with
+  `mid::load_soundfont` + `mid::render_to_pcm` / `mid::render_to_wav`
+- `xmi`: parse with `xmi::XmiFile::parse`, convert to SMF with `xmi::to_mid`
+- `transcribe`: build a `transcribe::TranscribeConfig`, then call
+  `pcm_to_mid`, `wav_to_mid`, or `wav_to_xmi`
+- `meg`: parse Petroglyph archives with `meg::MegArchive::parse`, then use
+  `get` for name lookup or `get_by_index` when iterating entries
 
 ## Design Documents
 
