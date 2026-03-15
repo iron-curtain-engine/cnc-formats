@@ -96,14 +96,14 @@ Per D076, `cnc-formats` must parse **all** C&C binary formats:
 | `ini`  | `.ini` | Implemented | Classic C&C rules format (always enabled)              |
 | `miniyaml` | MiniYAML | Implemented | OpenRA rules format (behind `miniyaml` feature flag)  |
 
-The `cnc-formats` CLI binary provides `validate`, `inspect`, `convert`,
-`list`, and `extract` subcommands.  `validate` and `inspect` work on all
-formats unconditionally; `list` and `extract` operate on archive formats
-(currently MIX); `convert` requires the `convert` and/or `miniyaml` feature
-flags.  With the
-`convert` feature, bidirectional conversions are supported: SHP↔PNG/GIF,
-AUD↔WAV, WSA↔PNG/GIF, TMP↔PNG, PAL↔PNG, FNT→PNG, VQA↔AVI.  With
-the `miniyaml` feature, MiniYAML→YAML conversion is supported.
+The `cncf` CLI binary provides `validate`, `inspect`, `convert`, `list`,
+`extract`, `check`, and `fingerprint` subcommands.  `validate`, `inspect`,
+`check`, and `fingerprint` work on all formats unconditionally; `list` and
+`extract` operate on archive formats (MIX, plus MEG/PGM with the `meg`
+feature); `convert` requires the `convert` and/or `miniyaml` feature flags.
+With the `convert` feature, bidirectional conversions are supported:
+SHP↔PNG/GIF, AUD↔WAV, WSA↔PNG/GIF, TMP↔PNG, PAL↔PNG, FNT→PNG, VQA↔AVI.
+With the `miniyaml` feature, MiniYAML→YAML conversion is supported.
 
 Text format parsing (`.ini`, MiniYAML) was originally planned as a separate
 `cnc-text-formats` crate but was merged back into `cnc-formats` — `.ini` is as
@@ -381,9 +381,15 @@ src/
       convert.rs      — convert subcommand
       list.rs         — list subcommand (archive inventory)
       extract.rs      — extract subcommand (archive extraction)
+      check.rs        — check subcommand (deep integrity verification)
+      fingerprint.rs  — fingerprint subcommand (SHA-256)
 tests/
   cli.rs              — CLI integration tests (validate, inspect, convert, list, extract)
+  cli_convert.rs      — CLI conversion integration tests
   integration.rs      — cross-module integration tests
+skills/
+  cnc-formats/
+    SKILL.md          — LM skill file (CLI/API reference for agent consumption)
 ```
 
 ### Rules
@@ -429,6 +435,37 @@ tests/
 - **Agentic session coherence:**  An agent asked to "add a new test for MIX
   overflow" can read *only* `mix/tests.rs`, add the test, and run `cargo test`
   — never needing to parse or risk modifying production logic.
+
+## Skill Files (LM Integration)
+
+This project maintains an LM skill file at `skills/cnc-formats/SKILL.md`
+that teaches AI agents how to use the `cncf` CLI and the `cnc_formats` Rust
+API.  The file is tool-agnostic (not tied to any specific AI assistant) and
+is committed to the repository so all contributors and downstream consumers
+have access.
+
+The same file can be submitted to skill marketplaces (e.g.
+[anthropics/skills](https://github.com/anthropics/skills)) for broader
+discovery.
+
+### When to update the skill file
+
+Update `skills/cnc-formats/SKILL.md` when any of the following change:
+
+- CLI subcommands are added, removed, or renamed
+- CLI flags or their semantics change
+- Public API surface changes (new modules, renamed functions, new feature gates)
+- Supported formats or the conversion matrix changes
+- Format detection rules change (new auto-detected extensions, new ambiguities)
+- Critical gotchas are discovered or resolved
+
+### CLI `--help` is also LM-facing
+
+The clap help annotations in `src/bin/cnc-formats/main.rs` are structured
+for LM consumption (explicit rules, exit codes, conversion matrix, gotchas).
+When modifying CLI help text, maintain this structure — an LM running
+`cncf --help` should be able to construct correct commands without trial and
+error.
 
 ## Coding Principles
 
@@ -833,8 +870,8 @@ MSRV toolchain is auto-installed via `rustup` if missing.
   - `G1.5` `.tmp/.wsa/.fnt` parsing: **complete**
 - All D076 binary codec modules are implemented
 - Text format modules (`.ini`, MiniYAML) are implemented
-- CLI tool (`cnc-formats` binary) is implemented with `validate`, `inspect`,
-  `convert`, `list`, and `extract` subcommands
+- CLI tool (`cncf` binary) is implemented with `validate`, `inspect`,
+  `convert`, `list`, `extract`, `check`, and `fingerprint` subcommands
 - Goal #8 (`std::io::Read` streaming API) is tracked separately from the
   current slice-based crate surface
 
