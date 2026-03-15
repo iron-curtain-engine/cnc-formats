@@ -13,8 +13,12 @@
 </p>
 
 <p align="center">
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.85%2B-orange.svg" alt="Rust"></a><br>
-  <img src="images/rust_inside.png" alt="Rust-based project" width="112">
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.85%2B-orange.svg" alt="Rust"></a>
+  &nbsp;&nbsp;
+  <img src="https://img.shields.io/badge/LM-ready-blueviolet.svg" alt="LM Ready"><br>
+  <img src="images/rust_inside.png" alt="Rust-based project" width="74">
+  &nbsp;
+  <img src="images/lm_ready.png" alt="LM Ready" width="74">
 </p>
 
 Clean-room binary format parsers for Command & Conquer game files, plus the
