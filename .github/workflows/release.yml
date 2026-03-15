@@ -53,7 +53,9 @@ jobs:
       - name: Build release binary
         run: |
           ${{ matrix.cross && 'cross' || 'cargo' }} build \
+            --locked \
             --release \
+            --bin cncf \
             --target ${{ matrix.target }} \
             --features cli,encrypted-mix,convert,miniyaml
         shell: bash
@@ -62,8 +64,8 @@ jobs:
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
-          BIN_NAME="cnc-formats"
-          ARCHIVE_NAME="${BIN_NAME}-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          BIN_NAME="cncf"
+          ARCHIVE_NAME="cnc-formats-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
           cd target/${{ matrix.target }}/release
           tar czf "../../../${ARCHIVE_NAME}" "${BIN_NAME}"
           cd ../../..
@@ -73,7 +75,7 @@ jobs:
       - name: Package (Windows)
         if: matrix.archive == 'zip'
         run: |
-          $BinName = "cnc-formats.exe"
+          $BinName = "cncf.exe"
           $ArchiveName = "cnc-formats-${env:GITHUB_REF_NAME}-${{ matrix.target }}.zip"
           Compress-Archive -Path "target/${{ matrix.target }}/release/$BinName" -DestinationPath $ArchiveName
           echo "ARCHIVE_NAME=$ArchiveName" >> $env:GITHUB_ENV

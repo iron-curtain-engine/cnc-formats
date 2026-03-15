@@ -1,11 +1,21 @@
 # cnc-formats
 
-[![CI](https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/ci.yml/badge.svg)](https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/ci.yml)
-[![Fuzz](https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/fuzz.yml/badge.svg)](https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/fuzz.yml)
-[![Security Audit](https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/audit.yml/badge.svg)](https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/audit.yml)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
-[![No GPL](https://img.shields.io/badge/no_GPL_deps-enforced-brightgreen.svg)](deny.toml)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+<p align="center">
+  <img src="images/logo.png" alt="Iron Curtain logo" width="280">
+</p>
+
+<p align="center">
+  <a href="https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/ci.yml"><img src="https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/fuzz.yml"><img src="https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/fuzz.yml/badge.svg" alt="Fuzz"></a>
+  <a href="https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/audit.yml"><img src="https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/audit.yml/badge.svg" alt="Security Audit"></a>
+  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg" alt="License"></a>
+  <a href="deny.toml"><img src="https://img.shields.io/badge/no_GPL_deps-enforced-brightgreen.svg" alt="No GPL"></a>
+</p>
+
+<p align="center">
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.85%2B-orange.svg" alt="Rust"></a><br>
+  <img src="images/rust_inside.png" alt="Rust-based project" width="112">
+</p>
 
 Clean-room binary format parsers for Command & Conquer game files, plus the
 `cncf` command-line utility.
