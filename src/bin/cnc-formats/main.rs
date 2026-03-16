@@ -257,7 +257,7 @@ MIX FILENAME RESOLUTION (checked in order):\n\
     /// Writes each archive entry as a separate file.
     /// MIX: entries named by resolved filename or {CRC:08X}.bin if unknown.
     /// MEG/PGM: entries use their stored filenames directly.
-    /// Default output directory: <archive>_extracted/.
+    /// Default output directory: `ARCHIVE_extracted/`.
     #[command(after_long_help = "\
 EXAMPLES:\n\
   cncf extract CONQUER.MIX\n\
@@ -320,7 +320,7 @@ CHECKS PERFORMED:\n\
         #[arg(long, value_enum)]
         format: Option<Format>,
     },
-    /// SHA-256 hash in sha256sum-compatible format (<hex>  <filename>).
+    /// SHA-256 hash in sha256sum-compatible format: `HEX  FILENAME`.
     ///
     /// Computes SHA-256 of the raw file bytes and prints in the standard
     /// sha256sum format: `<64-char hex>  <filename>`.  Works on any file

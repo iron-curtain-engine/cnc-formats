@@ -205,6 +205,32 @@ All decompressors and format parsers must enforce:
 
 These requirements implement V38 from `src/06-SECURITY.md`.
 
+### 6a. Boundary Path Security (`strict-path`)
+
+Use `strict-path` only when joining an **untrusted child path** beneath a
+trusted filesystem boundary.
+
+Examples of untrusted child paths include archive metadata, extracted filename
+tables, request parameters, uploaded filenames, and config-defined relative
+paths.  In those cases, the boundary root may be user-chosen, but the path
+joined *under* that root is not fully under the user's control and must be
+validated against boundary escapes.
+
+Do **not** use `StrictPath` for:
+
+- direct user-chosen output paths with no untrusted child component
+- internally generated flat filenames (for example deterministic fallback names)
+- other paths that are already fully under local control
+
+If no untrusted relative path survives, prefer `Path`/`PathBuf`.  If an
+untrusted relative path is preserved, use `PathBoundary::strict_join` and keep
+the validated result as `StrictPath` until I/O is complete.
+
+Prefer the simplest code that still makes the trust boundary obvious.  Small
+helpers or wrapper types are justified when they materially reduce misuse risk
+for humans or LLMs reading the code; avoid them when they only restate a
+distinction without changing behavior or simplifying the call site.
+
 ### 7. Git Safety — Read-Only Only
 
 Agents must treat git refs, branches, the index, and the working tree as
