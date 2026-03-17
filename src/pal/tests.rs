@@ -122,21 +122,19 @@ fn test_to_rgb8_array_white_entry() {
     assert_eq!(rgb8[0], [0, 0, 0]);
 }
 
-/// Extra bytes beyond 768 are silently ignored.
+/// Extra bytes beyond 768 are rejected.
 ///
-/// Why: the PAL format has no explicit length field; the parser reads
-/// exactly 768 bytes and ignores the rest.  Files padded by container
-/// formats (e.g. MIX) must still parse correctly.
+/// Why: standalone PAL validation should not accept arbitrary larger files
+/// whose first 768 bytes merely happen to look palette-like.
 #[test]
-fn test_parse_extra_bytes_ignored() {
+fn test_parse_extra_bytes_rejected() {
     let mut data = all_zero_pal();
     data[0] = 7;
-    // Append some extra bytes — parse should still succeed
     let mut extended = data.clone();
     extended.extend_from_slice(&[0xFFu8; 10]);
 
-    let pal = Palette::parse(&extended).unwrap();
-    assert_eq!(pal.colors[0].r, 7);
+    let err = Palette::parse(&extended).unwrap_err();
+    assert!(matches!(err, Error::InvalidSize { .. }));
 }
 
 /// Parsing the same PAL data twice yields identical results.
@@ -292,16 +290,13 @@ fn adversarial_all_ff_no_panic() {
     assert_eq!(pal.colors[255].to_rgb8(), [252, 252, 252]);
 }
 
-/// `Palette::parse` on 769 bytes accepts the first 768 and ignores trailing.
-///
-/// Why: real PAL files may have trailing metadata or padding.  The parser
-/// must consume exactly 768 bytes and ignore the rest.
+/// `Palette::parse` on 769 bytes rejects the trailing data.
 #[test]
-fn adversarial_trailing_data_ignored() {
+fn adversarial_trailing_data_rejected() {
     let mut data = vec![0u8; 769];
     data[768] = 0xDE; // trailing byte
-    let pal = Palette::parse(&data).unwrap();
-    assert_eq!(pal.colors.len(), 256);
+    let err = Palette::parse(&data).unwrap_err();
+    assert!(matches!(err, Error::InvalidSize { .. }));
 }
 
 /// `Palette::parse` on a sub-valid-size all-zero buffer must not panic.

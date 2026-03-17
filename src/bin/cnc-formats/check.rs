@@ -9,7 +9,7 @@
 //!
 //! ## Additional checks
 //!
-//! - **Archives (MIX, MEG):** detect overlapping entry ranges.
+//! - **Archives (MIX, BIG, MEG):** detect overlapping entry ranges.
 
 use super::{print_format_hint, read_file, resolve_format, Format};
 
@@ -33,6 +33,7 @@ pub(crate) fn cmd_check(path: &str, explicit: Option<Format>) -> i32 {
 
     match fmt {
         Format::Mix => check_mix(&data, &mut warnings, &mut errors),
+        Format::Big => check_big(&data, &mut warnings, &mut errors),
         #[cfg(feature = "meg")]
         Format::Meg => check_meg(&data, &mut warnings, &mut errors),
         _ => {
@@ -78,6 +79,9 @@ fn parse_for_check(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> 
         Format::Mix => {
             cnc_formats::mix::MixArchive::parse(data)?;
         }
+        Format::Big => {
+            cnc_formats::big::BigArchive::parse(data)?;
+        }
         Format::Shp => {
             cnc_formats::shp::ShpFile::parse(data)?;
         }
@@ -86,6 +90,12 @@ fn parse_for_check(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> 
         }
         Format::Aud => {
             cnc_formats::aud::AudFile::parse(data)?;
+        }
+        Format::Lut => {
+            cnc_formats::lut::LutFile::parse(data)?;
+        }
+        Format::Dip => {
+            cnc_formats::dip::DipFile::parse(data)?;
         }
         Format::Tmp => {
             cnc_formats::tmp::TdTmpFile::parse(data)?;
@@ -96,11 +106,17 @@ fn parse_for_check(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> 
         Format::Vqa => {
             cnc_formats::vqa::VqaFile::parse(data)?;
         }
+        Format::Vqp => {
+            cnc_formats::vqp::VqpFile::parse(data)?;
+        }
         Format::Wsa => {
             cnc_formats::wsa::WsaFile::parse(data)?;
         }
         Format::Fnt => {
             cnc_formats::fnt::FntFile::parse(data)?;
+        }
+        Format::Eng => {
+            cnc_formats::eng::EngFile::parse(data)?;
         }
         Format::Ini => {
             cnc_formats::ini::IniFile::parse(data)?;
@@ -131,6 +147,37 @@ fn parse_for_check(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> 
         }
     }
     Ok(())
+}
+
+/// Deep integrity checks for BIG archives.
+#[allow(clippy::ptr_arg)]
+fn check_big(data: &[u8], _warnings: &mut Vec<String>, errors: &mut Vec<String>) {
+    let archive = match cnc_formats::big::BigArchive::parse(data) {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+
+    let entries = archive.entries();
+
+    if entries.len() >= 2 {
+        let mut sorted: Vec<(u64, u64, &str)> = entries
+            .iter()
+            .map(|e| (e.offset, e.size, e.name.as_str()))
+            .collect();
+        sorted.sort_by_key(|&(off, _, _)| off);
+
+        for i in 1..sorted.len() {
+            let (prev_off, prev_size, prev_name) = sorted[i - 1];
+            let (cur_off, _, cur_name) = sorted[i];
+            let prev_end = prev_off.saturating_add(prev_size);
+            if prev_end > cur_off && prev_size > 0 {
+                errors.push(format!(
+                    "overlapping entries: \"{prev_name}\" (offset {prev_off}, \
+                     size {prev_size}) overlaps \"{cur_name}\" (offset {cur_off})"
+                ));
+            }
+        }
+    }
 }
 
 // ── MIX checks ───────────────────────────────────────────────────────────

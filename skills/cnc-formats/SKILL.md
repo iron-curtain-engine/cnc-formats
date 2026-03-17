@@ -4,7 +4,7 @@ description: >
   Parse, inspect, convert, and extract Command & Conquer game files using the
   cnc-formats Rust library and cncf CLI tool. Use when working with C&C binary
   formats: .mix archives, .shp sprites, .pal palettes, .aud audio, .vqa video,
-  .tmp tiles, .wsa animations, .fnt fonts, .ini rules, .meg Petroglyph archives,
+  .lut Chrono Vortex tables, .vqp palette tables, .tmp tiles, .wsa animations, .fnt fonts, .eng string tables, .ini rules, .meg Petroglyph archives,
   .adl AdLib music, .xmi XMIDI, and .mid MIDI files.
 ---
 
@@ -52,10 +52,13 @@ cnc-formats = { version = "0.1", features = ["convert", "encrypted-mix", "miniya
 | SHP      | `.shp`        | Keyframe sprite frames            | LCW-compressed; needs PAL for rendering     |
 | PAL      | `.pal`        | 256-color VGA palette             | 6-bit values (0-63); x4 for 8-bit RGB      |
 | AUD      | `.aud`        | Westwood IMA ADPCM audio          | SCOMP=99 has chunk headers to strip         |
+| LUT      | `.lut`        | Chrono Vortex lookup table        | Red Alert `HOLE0000.LUT`-style assets       |
 | VQA      | `.vqa`        | VQ video (IFF chunk container)    | CBP codebook deferred to next frame group   |
+| VQP      | `.vqp`        | VQA palette interpolation tables  | Packed lower-triangle lookup tables         |
 | TMP      | `.tmp`        | Terrain tiles                     | TD and RA formats are INCOMPATIBLE          |
 | WSA      | `.wsa`        | LCW + XOR-delta animation         | Frame 0 keyframe, rest are deltas           |
 | FNT      | `.fnt`        | Bitmap font glyphs                | 4bpp nibble-packed, variable char count     |
+| ENG      | `.eng`/`.ger`/`.fre` | Westwood string tables     | Language packs share the same offset-table layout |
 | INI      | `.ini`        | C&C rules/config files            | Semicolon comments, permissive parsing      |
 | MiniYAML | `.miniyaml`   | OpenRA config format              | Feature: `miniyaml`                         |
 | MID      | `.mid`        | Standard MIDI file                | Feature: `midi`                             |
@@ -93,9 +96,12 @@ cnc-formats = { version = "0.1", features = ["convert", "encrypted-mix", "miniya
 | `.shp`       | SHP              |                                          |
 | `.pal`       | PAL              |                                          |
 | `.aud`       | AUD              |                                          |
+| `.lut`       | LUT              |                                          |
 | `.vqa`       | VQA              |                                          |
+| `.vqp`       | VQP              |                                          |
 | `.wsa`       | WSA              |                                          |
 | `.fnt`       | FNT              |                                          |
+| `.eng`/`.ger`/`.fre` | ENG       |                                          |
 | `.ini`       | INI              |                                          |
 | `.miniyaml`  | MiniYAML         |                                          |
 | `.meg`/`.pgm`| MEG              | Requires `meg` feature                   |
@@ -150,8 +156,11 @@ MIX archives use CRC hashes instead of filenames. Three resolution sources
    `#` comments allowed)
 2. **Embedded XCC database** — `local mix database.dat` entry inside the
    MIX (CRC `0x54C2D545`), placed by XCC Mixer
-3. **Built-in database** — 3,894 known TD/RA1 filenames compiled into the
-   binary
+3. **Built-in resolver** — built-in TD/RA1/RA2 candidate corpus compiled into
+   the binary; only unique CRC mappings are kept, collisions are omitted
+
+The MIX index stores `CRC(filename)`, offset, and size. The CRC is a hash of
+the filename text, not a checksum of file contents.
 
 Without any resolution, entries are extracted as `{CRC:08X}.bin`.
 
@@ -163,17 +172,20 @@ All parsers follow the same pattern — `parse(&[u8])` returns a
 `Result<T, cnc_formats::Error>`:
 
 ```rust
-use cnc_formats::{mix, pal, shp, aud, vqa, tmp, wsa, fnt, ini, Error};
+use cnc_formats::{mix, pal, shp, aud, lut, vqa, vqp, tmp, wsa, fnt, eng, ini, Error};
 
 let archive  = mix::MixArchive::parse(&data)?;
 let palette  = pal::Palette::parse(&data)?;
 let sprites  = shp::ShpFile::parse(&data)?;
 let audio    = aud::AudFile::parse(&data)?;
+let vortex   = lut::LutFile::parse(&data)?;
 let video    = vqa::VqaFile::parse(&data)?;
+let interp   = vqp::VqpFile::parse(&data)?;
 let tiles_td = tmp::TdTmpFile::parse(&data)?;
 let tiles_ra = tmp::RaTmpFile::parse(&data)?;
 let anim     = wsa::WsaFile::parse(&data)?;
 let font     = fnt::FntFile::parse(&data)?;
+let strings  = eng::EngFile::parse(&data)?;
 let config   = ini::IniFile::parse(&data)?;
 ```
 
@@ -346,7 +358,7 @@ These are the most common pitfalls when working with C&C formats:
 cncf extract CONQUER.MIX --output ./extracted/
 
 # The tool auto-detects embedded XCC databases and falls back to
-# the built-in 3,894-name TD/RA1 database. Files are named by
+# the built-in TD/RA1/RA2 filename database. Files are named by
 # their resolved filename where possible, CRC hex otherwise.
 ```
 

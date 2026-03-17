@@ -79,19 +79,24 @@ pub struct Palette {
 impl Palette {
     /// Parses a `.pal` file from a raw byte slice.
     ///
-    /// The slice must be at least [`PALETTE_BYTES`] (768) bytes long.  Extra
-    /// bytes beyond 768 are silently ignored, which is correct because PAL
-    /// files carry no header — the caller (or MIX container) determines the
-    /// logical file boundary.
+    /// The slice must be exactly [`PALETTE_BYTES`] (768) bytes long.
     ///
     /// # Errors
     ///
     /// Returns [`Error::UnexpectedEof`] if `data` is shorter than 768 bytes.
+    /// Returns [`Error::InvalidSize`] if `data` is longer than 768 bytes.
     pub fn parse(data: &[u8]) -> Result<Self, Error> {
         if data.len() < PALETTE_BYTES {
             return Err(Error::UnexpectedEof {
                 needed: PALETTE_BYTES,
                 available: data.len(),
+            });
+        }
+        if data.len() > PALETTE_BYTES {
+            return Err(Error::InvalidSize {
+                value: data.len(),
+                limit: PALETTE_BYTES,
+                context: "PAL file size",
             });
         }
         let mut colors = [PalColor { r: 0, g: 0, b: 0 }; PALETTE_SIZE];

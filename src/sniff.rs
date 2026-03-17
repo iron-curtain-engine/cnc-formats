@@ -27,6 +27,8 @@
 //! assert_eq!(sniff_format(&[0xDE, 0xAD]), None);
 //! ```
 
+use crate::read::{read_u16_le, read_u32_le};
+
 /// Inspects the first bytes of `data` and returns a file extension hint.
 ///
 /// Returns `Some("shp")`, `Some("pal")`, etc. for recognised formats,
@@ -39,6 +41,12 @@ pub fn sniff_format(data: &[u8]) -> Option<&'static str> {
     if is_vqa(data) {
         return Some("vqa");
     }
+    if is_big(data) {
+        return Some("big");
+    }
+    if is_meg(data) {
+        return Some("meg");
+    }
     if is_mix(data) {
         return Some("mix");
     }
@@ -47,16 +55,25 @@ pub fn sniff_format(data: &[u8]) -> Option<&'static str> {
     }
 
     // ── Formats with structural signatures (good reliability) ───────
-    if is_aud(data) {
-        return Some("aud");
-    }
     if is_fnt(data) {
         return Some("fnt");
+    }
+    if is_dip(data) {
+        return Some("dip");
+    }
+    if is_lut(data) {
+        return Some("lut");
     }
 
     // ── Exact-size format ───────────────────────────────────────────
     if is_pal(data) {
         return Some("pal");
+    }
+    if is_vqp(data) {
+        return Some("vqp");
+    }
+    if is_eng(data) {
+        return Some("eng");
     }
 
     // ── Heuristic formats (try parser, least reliable) ──────────────
@@ -66,13 +83,97 @@ pub fn sniff_format(data: &[u8]) -> Option<&'static str> {
     if is_wsa(data) {
         return Some("wsa");
     }
+    if is_aud(data) {
+        return Some("aud");
+    }
 
     None
+}
+
+/// Segmented DIP installer data: section table followed by control streams.
+///
+/// String-table DIPs intentionally continue to sniff as `eng`; only the
+/// non-string segmented variant needs content-based recovery from anonymous
+/// archive blobs.
+fn is_dip(data: &[u8]) -> bool {
+    crate::dip::DipSegmentedFile::parse(data).is_ok()
+}
+
+/// ENG-family string table: offset table followed by NUL-terminated strings.
+fn is_eng(data: &[u8]) -> bool {
+    if data.len() < 8 {
+        return false;
+    }
+    let eng = match crate::eng::EngFile::parse(data) {
+        Ok(eng) => eng,
+        Err(_) => return false,
+    };
+
+    let mut total = 0usize;
+    let mut printable = 0usize;
+    for entry in eng
+        .strings
+        .iter()
+        .filter(|entry| !entry.bytes.is_empty())
+        .take(8)
+    {
+        for &byte in entry.bytes.iter().take(64) {
+            total = total.saturating_add(1);
+            if byte.is_ascii_graphic() || byte == b' ' || byte == b'\t' {
+                printable = printable.saturating_add(1);
+            }
+        }
+    }
+
+    total > 0 && printable.saturating_mul(10) >= total.saturating_mul(9)
+}
+
+/// Petroglyph MEG archives use a strong 8-byte header marker.
+fn is_meg(data: &[u8]) -> bool {
+    if data.len() < 8 {
+        return false;
+    }
+    matches!(
+        (read_u32_le(data, 0).ok(), read_u32_le(data, 4).ok(),),
+        (Some(0xFFFF_FFFF), Some(0x3F7D_70A4)) | (Some(0x8FFF_FFFF), Some(0x3F7D_70A4))
+    )
+}
+
+/// Red Alert Chrono Vortex LUT: 4,096 triplets with tightly bounded values.
+fn is_lut(data: &[u8]) -> bool {
+    crate::lut::LutFile::parse(data).is_ok()
+}
+
+/// VQP: 4-byte count followed by `count * 32,896` bytes of packed tables.
+fn is_vqp(data: &[u8]) -> bool {
+    let header = match data.get(..4) {
+        Some(header) => header,
+        None => return false,
+    };
+
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(header);
+    let table_count = u32::from_le_bytes(buf) as usize;
+    let table_bytes = match table_count.checked_mul(crate::vqp::VQP_TABLE_SIZE) {
+        Some(bytes) => bytes,
+        None => return false,
+    };
+    let expected = match 4usize.checked_add(table_bytes) {
+        Some(expected) => expected,
+        None => return false,
+    };
+
+    data.len() == expected
 }
 
 /// VQA: IFF container with `FORM` + `WVQA` magic.
 fn is_vqa(data: &[u8]) -> bool {
     data.len() >= 12 && data.get(..4) == Some(b"FORM") && data.get(8..12) == Some(b"WVQA")
+}
+
+/// BIG: EA archive with `BIGF`/`BIG4` magic.
+fn is_big(data: &[u8]) -> bool {
+    data.len() >= 16 && matches!(data.get(..4), Some(b"BIGF") | Some(b"BIG4"))
 }
 
 /// MIX: extended format starts with `0x0000` followed by flags, OR
@@ -87,20 +188,29 @@ fn is_mix(data: &[u8]) -> bool {
     if data.len() < 100 {
         return false;
     }
-    let w0 = u16::from_le_bytes([data[0], data[1]]);
+    let w0 = match read_u16_le(data, 0) {
+        Ok(word) => word,
+        Err(_) => return false,
+    };
     if w0 == 0 {
         // Extended format marker — flags must be 0x0001..0x0003.
         // (Flags 0x0000 with marker 0x0000 is just 4 zero bytes, too ambiguous.)
         // Encrypted archives (flag 0x0002) must be >= 90 bytes (4 + 80 key + header).
         if data.len() >= 90 {
-            let flags = u16::from_le_bytes([data[2], data[3]]);
+            let flags = match read_u16_le(data, 2) {
+                Ok(flags) => flags,
+                Err(_) => return false,
+            };
             return (1..=0x0003).contains(&flags);
         }
         return false;
     }
     // Basic format: count is non-zero; heuristic check.
     let count = w0 as usize;
-    let data_size = u32::from_le_bytes([data[2], data[3], data[4], data[5]]) as usize;
+    let data_size = match read_u32_le(data, 2) {
+        Ok(size) => size as usize,
+        Err(_) => return false,
+    };
     let header_plus_index = 6usize.saturating_add(count.saturating_mul(12));
     let expected_total = header_plus_index.saturating_add(data_size);
     // File should be at least header + index, and the total (header +
@@ -130,37 +240,38 @@ fn is_ini(data: &[u8]) -> bool {
     prefix.contains(&b'[')
 }
 
-/// AUD: 12-byte header with plausible fields.
-///
-/// Checks: sample_rate 1..65535, compression ID is 1 (WS ADPCM) or 99 (IMA),
-/// and compressed_size + 12 ≈ file size.
 fn is_aud(data: &[u8]) -> bool {
     if data.len() < 12 {
         return false;
     }
-    let sample_rate = u16::from_le_bytes([data[0], data[1]]);
+
+    let sample_rate = match read_u16_le(data, 0) {
+        Ok(rate) => rate,
+        Err(_) => return false,
+    };
     if sample_rate == 0 {
         return false;
     }
-    let compressed_size = u32::from_le_bytes([data[2], data[3], data[4], data[5]]) as usize;
-    let compression = data[11];
-    // Known Westwood compression IDs: 1 (WS ADPCM) or 99 (IMA ADPCM).
+
+    let compressed_size = match read_u32_le(data, 2) {
+        Ok(size) => size as usize,
+        Err(_) => return false,
+    };
+    let compression = match data.get(11) {
+        Some(&compression) => compression,
+        None => return false,
+    };
     if compression != 1 && compression != 99 {
         return false;
     }
-    // compressed_size + 12 should be close to file size.
+
     let expected = compressed_size.saturating_add(12);
     expected <= data.len().saturating_add(64) && expected >= data.len().saturating_sub(64)
 }
 
 /// FNT: 20-byte header with `data_blocks == 5` at offset 6.
 fn is_fnt(data: &[u8]) -> bool {
-    if data.len() < 20 {
-        return false;
-    }
-    let data_blocks = u16::from_le_bytes([data[6], data[7]]);
-    let compress = u16::from_le_bytes([data[8], data[9]]);
-    data_blocks == 5 && compress == 0
+    crate::fnt::FntFile::parse(data).is_ok()
 }
 
 /// PAL: exactly 768 bytes with all values in 0–63 range (6-bit VGA).
@@ -173,56 +284,23 @@ fn is_pal(data: &[u8]) -> bool {
 }
 
 /// SHP: try parsing the header to see if it forms a consistent structure.
-///
-/// Checks: frame_count > 0, width/height > 0 and ≤ 640,
-/// offset table fits within file, first frame offset has valid format code.
 fn is_shp(data: &[u8]) -> bool {
-    if data.len() < 30 {
-        return false;
+    let shp = match crate::shp::ShpFile::parse(data) {
+        Ok(shp) => shp,
+        Err(_) => return false,
+    };
+    let pixel_count = shp.frame_pixel_count();
+    for frame in &shp.frames {
+        if crate::lcw::decompress(frame.data, pixel_count).is_err() {
+            return false;
+        }
     }
-    let frame_count = u16::from_le_bytes([data[0], data[1]]) as usize;
-    if frame_count == 0 || frame_count > 10000 {
-        return false;
-    }
-    let width = u16::from_le_bytes([data[6], data[7]]);
-    let height = u16::from_le_bytes([data[8], data[9]]);
-    if width == 0 || height == 0 || width > 640 || height > 480 {
-        return false;
-    }
-    // Offset table: (frame_count + 2) entries × 8 bytes, starting at byte 14.
-    let offset_table_end = 14usize.saturating_add((frame_count + 2).saturating_mul(8));
-    if offset_table_end > data.len() {
-        return false;
-    }
-    // First frame offset entry: high byte should be a valid format code.
-    let first_offset_raw = u32::from_le_bytes([data[14], data[15], data[16], data[17]]);
-    let format_code = (first_offset_raw >> 24) & 0xFF;
-    // Valid format codes: 0x80 (LCW), 0x40 (XorLcw), 0x20 (XorPrev).
-    matches!(format_code, 0x80 | 0x40 | 0x20)
+    true
 }
 
 /// WSA: 14-byte header with plausible frame count, dimensions, and offset table.
 fn is_wsa(data: &[u8]) -> bool {
-    if data.len() < 22 {
-        return false;
-    }
-    let frame_count = u16::from_le_bytes([data[0], data[1]]) as usize;
-    if frame_count == 0 || frame_count > 8192 {
-        return false;
-    }
-    let width = u16::from_le_bytes([data[6], data[7]]);
-    let height = u16::from_le_bytes([data[8], data[9]]);
-    if width == 0 || height == 0 || width > 640 || height > 480 {
-        return false;
-    }
-    // Offset table: (frame_count + 2) × 4 bytes, starting at byte 14.
-    let table_end = 14usize.saturating_add((frame_count + 2).saturating_mul(4));
-    if table_end > data.len() {
-        return false;
-    }
-    // First offset should point somewhere after the header + offset table.
-    let first_offset = u32::from_le_bytes([data[14], data[15], data[16], data[17]]) as usize;
-    first_offset >= table_end || first_offset == 0
+    crate::wsa::WsaFile::parse(data).is_ok()
 }
 
 #[cfg(test)]
@@ -238,11 +316,57 @@ mod tests {
         assert_eq!(sniff_format(&data), Some("vqa"));
     }
 
+    /// BIG archives are detected by BIGF/BIG4 magic.
+    #[test]
+    fn sniff_big() {
+        let mut data = vec![0u8; 32];
+        data[..4].copy_from_slice(b"BIGF");
+        assert_eq!(sniff_format(&data), Some("big"));
+    }
+
     /// PAL files are detected by exact size (768) and value range (0–63).
     #[test]
     fn sniff_pal() {
         let data = vec![32u8; 768];
         assert_eq!(sniff_format(&data), Some("pal"));
+    }
+
+    /// ENG-family string tables are detected from their offset table layout.
+    #[test]
+    fn sniff_eng() {
+        let data = [6u8, 0, 6, 0, 7, 0, 0, b'A', 0];
+        assert_eq!(sniff_format(&data), Some("eng"));
+    }
+
+    /// Segmented DIP files are detected as installer data rather than generic blobs.
+    #[test]
+    fn sniff_segmented_dip() {
+        let data = [
+            0x02, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00,
+            0x3C, 0x3C, 0x01, 0x80, 0x00, 0x00, 0x0B, 0x80,
+        ];
+        assert_eq!(sniff_format(&data), Some("dip"));
+    }
+
+    /// Chrono Vortex LUT files are detected by their exact size and bounds.
+    #[test]
+    fn sniff_lut() {
+        let mut data = Vec::with_capacity(crate::lut::LUT_FILE_SIZE);
+        for i in 0..crate::lut::LUT_ENTRY_COUNT {
+            data.push((i % 64) as u8);
+            data.push(((i / 64) % 64) as u8);
+            data.push(((i / 256) % 16) as u8);
+        }
+        assert_eq!(sniff_format(&data), Some("lut"));
+    }
+
+    /// VQP files are detected by exact packed-table size.
+    #[test]
+    fn sniff_vqp() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.resize(4 + crate::vqp::VQP_TABLE_SIZE, 0);
+        assert_eq!(sniff_format(&data), Some("vqp"));
     }
 
     /// PAL with out-of-range values (>63) is not detected.

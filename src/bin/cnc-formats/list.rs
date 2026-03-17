@@ -45,6 +45,14 @@ pub(crate) fn cmd_list(path: &str, explicit: Option<Format>, names: Option<&str>
             };
             list_mix(&data, &name_map)
         }
+        Format::Big => {
+            if names.is_some() {
+                eprintln!(
+                    "Warning: --names is ignored for BIG archives; filenames are stored in the archive."
+                );
+            }
+            list_big(&data)
+        }
         #[cfg(feature = "meg")]
         Format::Meg => {
             if names.is_some() {
@@ -63,6 +71,9 @@ pub(crate) fn cmd_list(path: &str, explicit: Option<Format>, names: Option<&str>
 
 /// Returns `true` if the format is an archive type that `list` can handle.
 fn is_archive_format(fmt: &Format) -> bool {
+    if matches!(fmt, Format::Big) {
+        return true;
+    }
     #[cfg(feature = "meg")]
     if matches!(fmt, Format::Meg) {
         return true;
@@ -117,6 +128,33 @@ fn list_mix(data: &[u8], name_map: &HashMap<MixCrc, String>) -> i32 {
 
     // ── Summary ──────────────────────────────────────────────────────────
     let total_size: u64 = entries.iter().map(|e| u64::from(e.size)).sum();
+    println!("\n{} entries, {} bytes total", entries.len(), total_size);
+
+    0
+}
+
+// ── BIG listing ──────────────────────────────────────────────────────────────
+
+/// Parse a BIG archive and print a per-entry table to stdout.
+fn list_big(data: &[u8]) -> i32 {
+    let archive = match cnc_formats::big::BigArchive::parse(data) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+
+    let entries = archive.entries();
+
+    println!("Name                                      Size");
+    println!("────────────────────────────────────  ──────────");
+
+    for entry in entries {
+        println!("{:<36}  {:>10}", entry.name, entry.size);
+    }
+
+    let total_size: u64 = entries.iter().map(|e| e.size).sum();
     println!("\n{} entries, {} bytes total", entries.len(), total_size);
 
     0

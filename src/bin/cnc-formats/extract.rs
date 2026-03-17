@@ -20,7 +20,7 @@
 use super::{
     build_mix_name_map, load_name_map, read_file, resolve_format, supported_archive_list, Format,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use cnc_formats::mix::MixCrc;
@@ -83,6 +83,14 @@ pub(crate) fn cmd_extract(
             };
             extract_mix(&data, &out_dir, &name_map, filter)
         }
+        Format::Big => {
+            if names.is_some() {
+                eprintln!(
+                    "Warning: --names is ignored for BIG archives; filenames are stored in the archive."
+                );
+            }
+            extract_big(&data, &out_dir, filter)
+        }
         #[cfg(feature = "meg")]
         Format::Meg => {
             if names.is_some() {
@@ -101,6 +109,9 @@ pub(crate) fn cmd_extract(
 
 /// Returns `true` if the format is an archive type that `extract` can handle.
 fn is_archive_format(fmt: &Format) -> bool {
+    if matches!(fmt, Format::Big) {
+        return true;
+    }
     #[cfg(feature = "meg")]
     if matches!(fmt, Format::Meg) {
         return true;
@@ -150,10 +161,11 @@ fn extract_mix(
 
     let mut extracted = 0u64;
     let mut bytes_total = 0u64;
+    let mut used_names = HashSet::new();
 
-    for entry in entries {
+    for (i, entry) in entries.iter().enumerate() {
         // Read entry data first so we can sniff format for unnamed files.
-        let file_data = match archive.get_by_crc(entry.crc) {
+        let file_data = match archive.get_by_index(i) {
             Some(d) => d,
             None => {
                 eprintln!(
@@ -168,6 +180,7 @@ fn extract_mix(
         // sniffed extension.
         let resolved = name_map.get(&entry.crc).map(|s| s.as_str());
         let display_name = resolved.unwrap_or("(unknown)");
+        let fallback_name = fallback_filename(entry.crc, Some(file_data));
         let (strict_path, relative_name, warning) =
             match resolve_output_name(&out_boundary, resolved, entry.crc, Some(file_data)) {
                 Ok(path) => path,
@@ -184,12 +197,19 @@ fn extract_mix(
             eprintln!("  Warning: {message}");
         }
 
-        // Apply filter: case-insensitive substring match on the final
-        // relative extraction path.
+        // Apply filter to the logical archive name before any collision-driven
+        // fallback rewrite so duplicate entries are not accidentally skipped.
         if let Some(ref fl) = filter_lower {
             if !relative_name.to_ascii_lowercase().contains(fl.as_str()) {
                 continue;
             }
+        }
+
+        let (strict_path, relative_name, collision_warning) =
+            make_output_name_unique(strict_path, relative_name, &fallback_name, &mut used_names);
+
+        if let Some(message) = collision_warning {
+            eprintln!("  Warning: {message}");
         }
 
         // Preserve a validated metadata path when one exists; otherwise use the
@@ -315,6 +335,189 @@ fn fallback_filename(crc: MixCrc, file_data: Option<&[u8]>) -> String {
     format!("{:08X}.{ext}", crc.to_raw())
 }
 
+/// Ensure one extraction run never writes two entries to the same path.
+///
+/// The preferred archive-derived name is used when available. If that name has
+/// already been claimed by an earlier entry, the extractor falls back to a
+/// deterministic flat filename and, if needed, appends a numeric suffix.
+fn make_output_name_unique(
+    strict_path: Option<StrictPath>,
+    relative_name: String,
+    fallback_name: &str,
+    used_names: &mut HashSet<String>,
+) -> (Option<StrictPath>, String, Option<String>) {
+    let key = relative_name.to_ascii_lowercase();
+    if used_names.insert(key) {
+        return (strict_path, relative_name, None);
+    }
+
+    let mut suffix = 2usize;
+    let mut candidate = if relative_name != fallback_name {
+        fallback_name.to_string()
+    } else {
+        suffixed_flat_name(fallback_name, suffix)
+    };
+    while !used_names.insert(candidate.to_ascii_lowercase()) {
+        candidate = suffixed_flat_name(fallback_name, suffix);
+        suffix = suffix.saturating_add(1);
+    }
+
+    let warning = format!("duplicate output name `{relative_name}`; using `{candidate}` instead");
+    (None, candidate, Some(warning))
+}
+
+/// Insert a numeric suffix before the extension of a generated flat filename.
+fn suffixed_flat_name(base: &str, suffix: usize) -> String {
+    let path = Path::new(base);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| base.to_string());
+    let ext = path.extension().map(|e| e.to_string_lossy().into_owned());
+
+    match ext {
+        Some(ext) if !ext.is_empty() => format!("{stem}__{suffix}.{ext}"),
+        _ => format!("{stem}__{suffix}"),
+    }
+}
+
+/// Keep duplicate metadata-derived paths distinct without flattening them.
+///
+/// Archive formats with stored filenames (BIG, MEG) should preserve those
+/// relative paths when safe. If an archive repeats the same logical path,
+/// append a numeric suffix before the extension instead of overwriting the
+/// earlier payload.
+fn make_stored_name_unique(
+    relative_name: &str,
+    used_names: &mut HashSet<String>,
+) -> (String, Option<String>) {
+    let key = relative_name.to_ascii_lowercase();
+    if used_names.insert(key) {
+        return (relative_name.to_string(), None);
+    }
+
+    let mut suffix = 2usize;
+    let mut candidate = suffixed_relative_name(relative_name, suffix);
+    while !used_names.insert(candidate.to_ascii_lowercase()) {
+        suffix = suffix.saturating_add(1);
+        candidate = suffixed_relative_name(relative_name, suffix);
+    }
+
+    let warning = format!("duplicate output name `{relative_name}`; using `{candidate}` instead");
+    (candidate, Some(warning))
+}
+
+/// Insert a numeric suffix before the last path component's extension while
+/// preserving parent directories.
+fn suffixed_relative_name(base: &str, suffix: usize) -> String {
+    let path = Path::new(base);
+    let file_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| base.to_string());
+    let suffixed = suffixed_flat_name(&file_name, suffix);
+
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            format!("{}/{}", parent.to_string_lossy(), suffixed)
+        }
+        _ => suffixed,
+    }
+}
+
+// ── BIG extraction ───────────────────────────────────────────────────────────
+
+/// Parse a BIG archive and extract matching entries to `out_dir`.
+///
+/// BIG archives store filenames directly, typically with Windows path
+/// separators. Those separators are normalised before boundary validation so
+/// extraction creates nested directories correctly on non-Windows hosts.
+fn extract_big(data: &[u8], out_dir: &Path, filter: Option<&str>) -> i32 {
+    let archive = match cnc_formats::big::BigArchive::parse(data) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+
+    let out_boundary: PathBoundary = match PathBoundary::try_new_create(out_dir) {
+        Ok(boundary) => boundary,
+        Err(e) => {
+            eprintln!(
+                "Error creating extraction boundary {}: {e}",
+                out_dir.display()
+            );
+            return 1;
+        }
+    };
+
+    let entries = archive.entries();
+    let filter_lower = filter.map(|f| f.to_ascii_lowercase());
+
+    eprintln!(
+        "Extracting from BIG archive ({} entries) to {}",
+        entries.len(),
+        out_dir.display()
+    );
+
+    let mut extracted = 0u64;
+    let mut bytes_total = 0u64;
+    let mut used_names = HashSet::new();
+
+    for (i, entry) in entries.iter().enumerate() {
+        let normalized_name = entry.name.replace('\\', "/");
+
+        if let Some(ref fl) = filter_lower {
+            if !normalized_name.to_ascii_lowercase().contains(fl.as_str()) {
+                continue;
+            }
+        }
+
+        let (relative_name, collision_warning) =
+            make_stored_name_unique(&normalized_name, &mut used_names);
+        if let Some(message) = collision_warning {
+            eprintln!("  Warning: {message}");
+        }
+
+        let out_path = match validate_candidate_path(&out_boundary, &relative_name) {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!(
+                    "  Warning: refusing unsafe path \"{}\": {e}, skipping",
+                    entry.name
+                );
+                continue;
+            }
+        };
+
+        let file_data = match archive.get_by_index(i) {
+            Some(d) => d,
+            None => {
+                eprintln!("  Warning: could not read \"{}\", skipping", entry.name);
+                continue;
+            }
+        };
+
+        if let Err(e) = out_path
+            .create_parent_dir_all()
+            .and_then(|_| out_path.write(file_data))
+        {
+            eprintln!("  Error writing {}: {e}", out_path.strictpath_display());
+            return 1;
+        }
+
+        eprintln!("  {} ({} bytes)", relative_name, entry.size);
+        extracted = extracted.saturating_add(1);
+        bytes_total = bytes_total.saturating_add(entry.size);
+    }
+
+    eprintln!("\nExtracted {extracted} files ({bytes_total} bytes total)");
+    0
+}
+
 // ── MEG extraction ───────────────────────────────────────────────────────────
 
 /// Parse a MEG archive and extract matching entries to `out_dir`.
@@ -354,17 +557,26 @@ fn extract_meg(data: &[u8], out_dir: &Path, filter: Option<&str>) -> i32 {
 
     let mut extracted = 0u64;
     let mut bytes_total = 0u64;
+    let mut used_names = HashSet::new();
 
     for (i, entry) in entries.iter().enumerate() {
+        let normalized_name = entry.name.replace('\\', "/");
+
         // Apply filter: case-insensitive substring match on the filename.
         if let Some(ref fl) = filter_lower {
-            if !entry.name.to_ascii_lowercase().contains(fl.as_str()) {
+            if !normalized_name.to_ascii_lowercase().contains(fl.as_str()) {
                 continue;
             }
         }
 
+        let (relative_name, collision_warning) =
+            make_stored_name_unique(&normalized_name, &mut used_names);
+        if let Some(message) = collision_warning {
+            eprintln!("  Warning: {message}");
+        }
+
         // Validate the filename against the extraction boundary.
-        let out_path = match out_boundary.strict_join(&entry.name) {
+        let out_path = match validate_candidate_path(&out_boundary, &relative_name) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!(
@@ -393,7 +605,7 @@ fn extract_meg(data: &[u8], out_dir: &Path, filter: Option<&str>) -> i32 {
             return 1;
         }
 
-        eprintln!("  {} ({} bytes)", entry.name, entry.size);
+        eprintln!("  {} ({} bytes)", relative_name, entry.size);
         extracted = extracted.saturating_add(1);
         bytes_total = bytes_total.saturating_add(entry.size);
     }
@@ -471,5 +683,64 @@ mod tests {
         assert!(!dir.join("evil.shp").exists());
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Duplicate logical filenames are rewritten instead of overwriting.
+    #[test]
+    fn duplicate_output_name_uses_unique_fallback() {
+        let mut used = HashSet::new();
+        let first =
+            make_output_name_unique(None, "ALLY1.VQP".to_string(), "1234ABCD.vqp", &mut used);
+        let second =
+            make_output_name_unique(None, "ALLY1.VQP".to_string(), "1234ABCD.vqp", &mut used);
+
+        assert_eq!(first.1, "ALLY1.VQP");
+        assert!(first.2.is_none());
+        assert_eq!(second.1, "1234ABCD.vqp");
+        assert!(second.2.is_some());
+
+        let third =
+            make_output_name_unique(None, "ALLY1.VQP".to_string(), "1234ABCD.vqp", &mut used);
+        assert_eq!(third.1, "1234ABCD__2.vqp");
+    }
+
+    /// Duplicate stored archive paths get suffixed in place instead of
+    /// flattening to unrelated fallback names.
+    #[test]
+    fn duplicate_stored_name_preserves_parent_dirs() {
+        let mut used = HashSet::new();
+        let first = make_stored_name_unique("Data/Audio/test.wav", &mut used);
+        let second = make_stored_name_unique("Data/Audio/test.wav", &mut used);
+
+        assert_eq!(first.0, "Data/Audio/test.wav");
+        assert!(first.1.is_none());
+        assert_eq!(second.0, "Data/Audio/test__2.wav");
+        assert!(second.1.is_some());
+    }
+
+    /// Sniffed LUT content gets a `.lut` fallback extension.
+    #[test]
+    fn fallback_filename_uses_lut_extension() {
+        let mut data = Vec::with_capacity(cnc_formats::lut::LUT_FILE_SIZE);
+        for i in 0..cnc_formats::lut::LUT_ENTRY_COUNT {
+            data.push((i % 64) as u8);
+            data.push(((i / 64) % 64) as u8);
+            data.push(((i / 256) % 16) as u8);
+        }
+
+        let name = fallback_filename(MixCrc::from_raw(0xDEAD_BEEF), Some(&data));
+        assert_eq!(name, "DEADBEEF.lut");
+    }
+
+    /// Segmented setup-data DIPs get a `.dip` fallback extension.
+    #[test]
+    fn fallback_filename_uses_dip_extension() {
+        let data = [
+            0x02, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00,
+            0x3C, 0x3C, 0x01, 0x80, 0x00, 0x00, 0x0B, 0x80,
+        ];
+
+        let name = fallback_filename(MixCrc::from_raw(0xDEAD_BEEF), Some(&data));
+        assert_eq!(name, "DEADBEEF.dip");
     }
 }

@@ -25,7 +25,8 @@ Clean-room binary format parsers for Command & Conquer game files, plus the
 `cncf` command-line utility.
 
 Parses `.mix` archives, `.shp` sprites, `.pal` palettes, `.aud` audio,
-`.vqa` video, `.tmp` terrain tiles, `.wsa` animations, `.fnt` bitmap fonts,
+`.lut` Chrono Vortex lookup tables, `.vqa` video, `.vqp` palette interpolation sidecars, `.tmp` terrain tiles,
+`.wsa` animations, `.fnt` bitmap fonts, `.eng` string tables,
 `.ini` rules files, and LCW-compressed data used by Red Alert, Tiberian Dawn,
 and related C&C titles. Optional feature flags add MiniYAML, MIDI, ADL,
 XMIDI, PCM-to-MIDI transcription, and Petroglyph MEG/PGM archive support.
@@ -44,10 +45,13 @@ XMIDI, PCM-to-MIDI transcription, and Petroglyph MEG/PGM archive support.
 | `pal`       | `.pal` | 256-color 6-bit VGA palette                                                     |
 | `aud`       | `.aud` | Westwood IMA ADPCM audio                                                        |
 | `lcw`       | —      | LCW decompression (used by SHP, VQA, WSA)                                       |
+| `lut`       | `.lut` | Red Alert Chrono Vortex lookup tables                                           |
 | `tmp`       | `.tmp` | Terrain tile sets (TD + RA variants)                                            |
 | `vqa`       | `.vqa` | VQ video container (IFF chunk-based)                                            |
+| `vqp`       | `.vqp` | Packed VQA palette interpolation tables                                         |
 | `wsa`       | `.wsa` | LCW + XOR-delta animation                                                       |
 | `fnt`       | `.fnt` | Bitmap fonts (variable character count, 4bpp nibble-packed)                     |
+| `eng`       | `.eng` | Westwood language string tables (`.eng`, `.ger`, `.fre`)                        |
 | `ini`       | `.ini` | Classic C&C rules file parser                                                   |
 | `mix_crypt` | —      | Blowfish key derivation for encrypted `.mix` (requires `encrypted-mix` feature) |
 | `sniff`     | —      | Content-based format detection (`sniff::sniff_format`)                          |
@@ -76,11 +80,11 @@ structure, then optionally run helper conversion or rendering APIs.
 | Error handling | `cnc_formats::Error` re-exported at the crate root |
 | Format detection | `sniff::sniff_format(&[u8]) -> Option<&'static str>` |
 | MIX archives | `mix::crc`, `mix::builtin_name_map`, `mix::MixArchive::parse`, `get`, `get_by_crc`, `entries`, `file_count` |
-| AUD audio | `aud::AudFile::parse`, `aud::decode_adpcm`, `aud::encode_adpcm`, `aud::build_aud` |
+| AUD / LUT data | `aud::AudFile::parse`, `aud::decode_adpcm`, `aud::encode_adpcm`, `aud::build_aud`, `lut::LutFile::parse` |
 | LCW codec | `lcw::decompress`, `lcw::compress` |
 | SHP / WSA / TMP | `shp::ShpFile::parse`, `shp::encode_frames`, `wsa::WsaFile::parse`, `wsa::encode_frames`, `tmp::TdTmpFile::parse`, `tmp::RaTmpFile::parse`, `tmp::encode_td_tmp` |
-| PAL / FNT / INI | `pal::Palette::parse`, `fnt::FntFile::parse`, `ini::IniFile::parse` |
-| VQA | `vqa::VqaFile::parse`, `VqaFile::decode_frames`, `VqaFile::extract_audio` |
+| PAL / FNT / ENG / INI | `pal::Palette::parse`, `fnt::FntFile::parse`, `eng::EngFile::parse`, `ini::IniFile::parse` |
+| VQA / VQP | `vqa::VqaFile::parse`, `VqaFile::decode_frames`, `VqaFile::extract_audio`, `vqp::VqpFile::parse`, `VqpTable::get` |
 
 ### Feature-gated APIs
 
@@ -116,12 +120,13 @@ feature. Use `--format <fmt>` when the file extension is ambiguous
 for `.yaml` files that are MiniYAML).
 
 `list` displays a tabular inventory of archive entries (CRC, size, and
-optionally resolved filenames via `--names <file>` for MIX archives).
+optionally resolved filenames via `--names <file>` or the built-in unique-CRC
+resolver for MIX archives).
 
 `extract` writes each archive entry to a separate file.  Use `--output <dir>`
 to set the destination, `--names <file>` to resolve MIX filenames, and
-`--filter <substring>` to extract only matching entries. MEG/PGM archives
-store filenames directly.
+`--filter <substring>` to extract only matching entries. MEG/PGM archives store
+filenames directly.
 
 `convert` requires `--to` (target format).  `--format` overrides auto-detected
 source format — `.miniyaml` auto-detects, but `.yaml`/`.yml` always require

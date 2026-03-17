@@ -151,6 +151,43 @@ fn crc_local_mix_database_matches_openra() {
     assert_eq!(crc("local mix database.dat"), MixCrc::from_raw(0x54C2_D545));
 }
 
+/// Built-in filename map includes RA2-era filenames as well as TD/RA1 names.
+#[test]
+fn builtin_name_map_includes_ra2_entries() {
+    let names = builtin_name_map();
+    assert_eq!(
+        names.get(&crc("RULESMO.INI")).map(String::as_str),
+        Some("RULESMO.INI")
+    );
+    assert_eq!(
+        names.get(&crc("MWCLFX28.SNO")).map(String::as_str),
+        Some("MWCLFX28.SNO")
+    );
+    assert_eq!(
+        names.get(&crc("AUDIOMD.MIX")).map(String::as_str),
+        Some("AUDIOMD.MIX")
+    );
+}
+
+/// Built-in filename resolution omits ambiguous CRC collisions.
+///
+/// Why: the built-in corpus is a candidate list, not authoritative metadata.
+/// First-match-wins would make resolution depend on list order.
+#[test]
+fn builtin_name_map_omits_ambiguous_crc_collisions() {
+    let names = builtin_name_map();
+    let bik_collision = crc("S10_P03E.BIK");
+    assert_eq!(bik_collision, crc("S11_P01E.BIK"));
+    assert_eq!(names.get(&bik_collision), None);
+
+    let second_collision = crc("A01_F04E.BIK");
+    assert_eq!(second_collision, crc("A03_F00E.BIK"));
+    assert_eq!(names.get(&second_collision), None);
+
+    let stats = builtin_name_stats();
+    assert!(stats.ambiguous_crc_count > 0);
+}
+
 // ── Determinism ──────────────────────────────────────────────────────
 
 /// Parsing the same archive bytes twice yields identical results.
@@ -481,6 +518,36 @@ fn adversarial_duplicate_crcs_no_panic() {
         data == data_a || data == data_b,
         "should return data from one of the two entries",
     );
+}
+
+/// `get_by_index` preserves distinct payloads for duplicate CRC entries.
+///
+/// Why: archive extraction must be able to dump every physical entry even when
+/// CRC lookup is ambiguous.
+#[test]
+fn get_by_index_preserves_duplicate_crc_entries() {
+    let dup_crc = MixCrc::from_raw(0x1234_5678);
+    let data_a = b"AAAA";
+    let data_b = b"BBBB";
+
+    let count: u16 = 2;
+    let data_size: u32 = (data_a.len() + data_b.len()) as u32;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&data_size.to_le_bytes());
+    out.extend_from_slice(&dup_crc.to_raw().to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&4u32.to_le_bytes());
+    out.extend_from_slice(&dup_crc.to_raw().to_le_bytes());
+    out.extend_from_slice(&4u32.to_le_bytes());
+    out.extend_from_slice(&4u32.to_le_bytes());
+    out.extend_from_slice(data_a);
+    out.extend_from_slice(data_b);
+
+    let archive = MixArchive::parse(&out).unwrap();
+    assert_eq!(archive.get_by_index(0), Some(data_a.as_slice()));
+    assert_eq!(archive.get_by_index(1), Some(data_b.as_slice()));
 }
 
 /// An archive where a SubBlock's offset points into the header area

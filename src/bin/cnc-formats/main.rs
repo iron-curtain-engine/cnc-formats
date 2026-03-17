@@ -9,6 +9,7 @@
 //! ```text
 //! cncf validate <file>                                  # Parse file, report OK or error
 //! cncf inspect  <file>                                  # Dump metadata / contents
+//! cncf identify <file>                                  # Content-sniff likely format
 //! cncf list     <archive>                               # Quick archive inventory
 //! cncf extract  <archive>                               # Extract archive to directory
 //! cncf convert  <file> --format miniyaml --to yaml      # Convert (.yaml is ambiguous)
@@ -19,9 +20,10 @@
 //! `--format <fmt>` to override when the extension is ambiguous (e.g.
 //! `.yaml` could be standard YAML or MiniYAML).
 //!
-//! `list` and `extract` operate on archive formats (`.mix`, plus `.meg`/`.pgm`
-//! when built with the `meg` feature).  Use `--names <file>` to provide known
-//! filenames for MIX CRC resolution.
+//! `list` and `extract` operate on archive formats (`.mix`, `.big`, plus
+//! `.meg`/`.pgm` when built with the `meg` feature).  MIX stores CRC hashes of
+//! filenames, not the filenames themselves; use `--names <file>` to provide
+//! candidate filenames for CRC resolution.
 //!
 //! `convert` uses `--format` and `--to` to specify the source and target
 //! formats.  `--format` can be omitted when the file extension is unambiguous
@@ -44,7 +46,8 @@ use std::process;
 
 /// CLI tool for working with classic Command & Conquer game assets.
 ///
-/// Supports MIX, SHP, PAL, AUD, TMP, VQA, WSA, FNT, INI, and MiniYAML.
+/// Supports MIX, BIG, SHP, PAL, AUD, LUT, TMP, VQA, VQP, WSA, FNT, DIP, ENG,
+/// INI, and MiniYAML.
 /// Auto-detects format from file extension; use --format to override.
 #[derive(Parser)]
 #[command(
@@ -55,7 +58,7 @@ use std::process;
 CLI tool for working with classic Command & Conquer game assets.\n\
 \n\
 SUPPORTED FORMATS:\n\
-  Auto-detected: .mix .shp .pal .aud .vqa .wsa .fnt .ini .miniyaml .meg .pgm .mid .adl .xmi .avi\n\
+  Auto-detected: .mix .big .shp .pal .aud .lut .vqa .vqp .wsa .fnt .dip .eng .ger .fre .ini .miniyaml .meg .pgm .mid .adl .xmi .avi\n\
   Ambiguous:     .tmp — MUST use --format tmp (TD) or --format tmp-ra (RA)\n\
   Not detected:  .yaml .yml — use --format miniyaml if the file is MiniYAML\n\
 \n\
@@ -66,12 +69,14 @@ EXIT CODES:\n\
 IMPORTANT:\n\
   .tmp files ALWAYS require --format (TD and RA are incompatible formats)\n\
   SHP, TMP, WSA, FNT visual exports require --palette <file.pal>\n\
-  MIX filenames auto-resolve via built-in 3,894-name TD/RA1 database\n\
-  MEG/PGM archives store filenames directly (--names is ignored)",
+  MIX stores CRC hashes of filenames, not filenames or content checksums\n\
+  MIX names auto-resolve via built-in TD/RA1/RA2 candidate corpus\n\
+  BIG/MEG/PGM archives store filenames directly (--names is ignored)",
     after_long_help = "\
 QUICK REFERENCE:\n\
   cncf validate <file>                   Parse and report OK or error\n\
   cncf inspect  <file>                   Dump metadata and structure\n\
+  cncf identify <file>                   Sniff likely format from contents\n\
   cncf list     <archive>                List archive entries\n\
   cncf extract  <archive>                Extract entries to directory\n\
   cncf convert  <file> --to <fmt>        Convert between formats\n\
@@ -81,6 +86,7 @@ QUICK REFERENCE:\n\
 EXAMPLES:\n\
   cncf validate CONQUER.MIX\n\
   cncf inspect  units.shp\n\
+  cncf identify unknown.bin\n\
   cncf extract  CONQUER.MIX --output ./assets/ --filter .shp\n\
   cncf convert  units.shp --to png --palette temperat.pal\n\
   cncf convert  speech.aud --to wav\n\
@@ -100,6 +106,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Sniff the most likely format from file contents.
+    ///
+    /// Uses content-based probes instead of extension-based detection.
+    /// This is advisory and intentionally conservative: if the file does not
+    /// match a known signature strongly enough, the command prints `unknown`.
+    #[command(after_long_help = "\
+EXAMPLES:\n\
+  cncf identify unknown.bin\n\
+  cncf identify 54C2D545.bin\n\
+\n\
+OUTPUT:\n\
+  shp        a likely SHP file\n\
+  mix        a likely MIX archive\n\
+  unknown    no sufficiently strong signature matched")]
+    Identify {
+        /// Path to the input file.
+        file: String,
+    },
     /// Parse a file and report validity (exit 0=OK, 1=error).
     ///
     /// Reads the file, attempts to parse it as the detected (or specified)
@@ -118,8 +142,9 @@ OUTPUT:\n\
         file: String,
         /// Override auto-detected format (required for .tmp files).
         ///
-        /// Auto-detection works for: .mix, .shp, .pal, .aud, .vqa, .wsa,
-        /// .fnt, .ini, .miniyaml.  The .tmp extension is ambiguous (TD and
+        /// Auto-detection works for: .mix, .big, .shp, .pal, .aud, .lut, .vqa,
+        /// .vqp, .wsa, .fnt, .dip, .eng/.ger/.fre, .ini, .miniyaml.  The .tmp extension is
+        /// ambiguous (TD and
         /// RA use incompatible formats) — specify --format tmp or --format
         /// tmp-ra.
         #[arg(long, value_enum)]
@@ -226,8 +251,9 @@ IMPORTANT:\n\
     ///
     /// Prints a tabular inventory of every entry in the archive.
     /// MIX entries show CRC hash and size; filenames are resolved via
-    /// --names file, embedded XCC database, or built-in 3,894-name TD/RA1
-    /// database (checked in that order).
+    /// --names file, embedded XCC database, or built-in TD/RA1/RA2
+    /// unique-CRC resolver (checked in that order).
+    /// The CRC is a hash of the filename text, not a checksum of file contents.
     /// MEG/PGM archives always show stored filenames.
     #[command(after_long_help = "\
 EXAMPLES:\n\
@@ -235,9 +261,10 @@ EXAMPLES:\n\
   cncf list CONQUER.MIX --names td_filenames.txt\n\
 \n\
 MIX FILENAME RESOLUTION (checked in order):\n\
+  MIX index stores CRC(filename), offset, and size; it does not store names\n\
   1. --names <file>         user-supplied filename list\n\
   2. Embedded XCC LMD       \"local mix database.dat\" inside the archive\n\
-  3. Built-in database      3,894 known TD/RA1 filenames")]
+  3. Built-in resolver      TD/RA1/RA2 candidate corpus, unique CRCs only")]
     List {
         /// Path to the archive file.
         file: String,
@@ -247,8 +274,8 @@ MIX FILENAME RESOLUTION (checked in order):\n\
         /// Text file with known filenames (one per line) for MIX CRC resolution.
         ///
         /// Each non-empty, non-comment line is hashed with the MIX CRC
-        /// algorithm and matched against archive entries.  Lines starting
-        /// with '#' are ignored.  Ignored for MEG/PGM archives.
+        /// algorithm and matched against archive entries by filename CRC.
+        /// Lines starting with '#' are ignored.  Ignored for MEG/PGM archives.
         #[arg(long)]
         names: Option<String>,
     },
@@ -256,6 +283,7 @@ MIX FILENAME RESOLUTION (checked in order):\n\
     ///
     /// Writes each archive entry as a separate file.
     /// MIX: entries named by resolved filename or {CRC:08X}.bin if unknown.
+    /// MIX CRCs are hashes of filenames, not content checksums.
     /// MEG/PGM: entries use their stored filenames directly.
     /// Default output directory: `ARCHIVE_extracted/`.
     #[command(after_long_help = "\
@@ -268,7 +296,7 @@ EXAMPLES:\n\
 OUTPUT NAMING:\n\
   MIX without --names:  {CRC:08X}.bin  (e.g. 4BF58B8E.bin)\n\
   MIX with --names:     resolved.ext   (e.g. RULES.INI)\n\
-  MIX with built-in DB: auto-resolves 3,894 known TD/RA1 filenames\n\
+  MIX with built-in DB: auto-resolves built-in TD/RA1/RA2 filename candidates\n\
   MEG/PGM:              stored filename (e.g. DATA/ART/UNIT.TGA)")]
     Extract {
         /// Path to the archive file.
@@ -281,6 +309,7 @@ OUTPUT NAMING:\n\
         output: Option<String>,
         /// Text file with known filenames (one per line) for MIX CRC resolution.
         ///
+        /// Each line is hashed as a filename and matched against archive CRCs.
         /// Ignored for MEG/PGM archives, which store filenames directly.
         #[arg(long)]
         names: Option<String>,
@@ -340,14 +369,19 @@ OUTPUT FORMAT:\n\
 #[derive(Clone, ValueEnum)]
 pub(crate) enum Format {
     Mix,
+    Big,
     Shp,
     Pal,
     Aud,
+    Lut,
+    Dip,
     Tmp,
     TmpRa,
     Vqa,
+    Vqp,
     Wsa,
     Fnt,
+    Eng,
     Ini,
     #[cfg(feature = "convert")]
     Avi,
@@ -407,6 +441,7 @@ pub(crate) enum ConvertTarget {
 fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
+        Command::Identify { file } => cmd_identify(&file),
         Command::Validate { file, format } => cmd_validate(&file, format),
         Command::Inspect { file, format } => inspect::cmd_inspect(&file, format),
         #[cfg(any(feature = "convert", feature = "miniyaml"))]
@@ -470,14 +505,19 @@ fn detect_format(path: &str) -> Option<Format> {
     let ext = path.rsplit('.').next()?.to_ascii_lowercase();
     match ext.as_str() {
         "mix" => Some(Format::Mix),
+        "big" => Some(Format::Big),
         "shp" => Some(Format::Shp),
         "pal" => Some(Format::Pal),
         "aud" => Some(Format::Aud),
+        "lut" => Some(Format::Lut),
+        "dip" => Some(Format::Dip),
         // ".tmp" is ambiguous: TD and RA use incompatible tile formats.
         // Require explicit --format tmp or --format tmp-ra.
         "vqa" => Some(Format::Vqa),
+        "vqp" => Some(Format::Vqp),
         "wsa" => Some(Format::Wsa),
         "fnt" => Some(Format::Fnt),
+        "eng" | "ger" | "fre" => Some(Format::Eng),
         "ini" => Some(Format::Ini),
         #[cfg(feature = "convert")]
         "avi" => Some(Format::Avi),
@@ -492,6 +532,38 @@ fn detect_format(path: &str) -> Option<Format> {
         #[cfg(feature = "meg")]
         "meg" | "pgm" => Some(Format::Meg),
         _ => None,
+    }
+}
+
+fn format_name(fmt: &Format) -> &'static str {
+    match fmt {
+        Format::Mix => "mix",
+        Format::Big => "big",
+        Format::Shp => "shp",
+        Format::Pal => "pal",
+        Format::Aud => "aud",
+        Format::Lut => "lut",
+        Format::Dip => "dip",
+        Format::Tmp => "tmp",
+        Format::TmpRa => "tmp-ra",
+        Format::Vqa => "vqa",
+        Format::Vqp => "vqp",
+        Format::Wsa => "wsa",
+        Format::Fnt => "fnt",
+        Format::Eng => "eng",
+        Format::Ini => "ini",
+        #[cfg(feature = "convert")]
+        Format::Avi => "avi",
+        #[cfg(feature = "miniyaml")]
+        Format::Miniyaml => "miniyaml",
+        #[cfg(feature = "midi")]
+        Format::Mid => "mid",
+        #[cfg(feature = "adl")]
+        Format::Adl => "adl",
+        #[cfg(feature = "xmi")]
+        Format::Xmi => "xmi",
+        #[cfg(feature = "meg")]
+        Format::Meg => "meg",
     }
 }
 
@@ -550,11 +622,11 @@ pub(crate) fn report_convert_error(path: &str, e: &cnc_formats::Error) {
 pub(crate) fn supported_archive_list() -> String {
     #[cfg(feature = "meg")]
     {
-        ["mix", "meg", "pgm"].join(", ")
+        ["mix", "big", "meg", "pgm"].join(", ")
     }
     #[cfg(not(feature = "meg"))]
     {
-        "mix".to_string()
+        "mix, big".to_string()
     }
 }
 
@@ -584,8 +656,8 @@ pub(crate) fn load_name_map(
 /// Build a CRC→filename map for a MIX archive from embedded + built-in sources.
 ///
 /// Checks for an XCC "local mix database.dat" entry inside the archive first,
-/// then falls back to the compiled-in TD/RA1 filename database.  Logs the
-/// source to stderr.
+/// then falls back to the compiled-in TD/RA1/RA2 unique-CRC resolver.  Logs
+/// the source to stderr.
 pub(crate) fn build_mix_name_map(data: &[u8]) -> HashMap<cnc_formats::mix::MixCrc, String> {
     // Try parsing the archive to check for embedded XCC LMD.
     if let Ok(archive) = cnc_formats::mix::MixArchive::parse(data) {
@@ -598,13 +670,30 @@ pub(crate) fn build_mix_name_map(data: &[u8]) -> HashMap<cnc_formats::mix::MixCr
             return embedded;
         }
     }
-    // Fall back to built-in database.
+    // Fall back to the built-in unique-CRC resolver.
     let builtin = cnc_formats::mix::builtin_name_map();
+    let stats = cnc_formats::mix::builtin_name_stats();
     eprintln!(
-        "Using built-in filename database ({} known names)",
-        builtin.len()
+        "Using built-in MIX name resolver ({} unique CRCs, {} ambiguous CRCs omitted)",
+        stats.resolved_crc_count, stats.ambiguous_crc_count
     );
     builtin
+}
+
+/// Sniff a likely format from file contents.
+fn cmd_identify(path: &str) -> i32 {
+    let data = read_file(path);
+    if let Some(fmt) = cnc_formats::sniff::sniff_format(&data) {
+        println!("{fmt}");
+        return 0;
+    }
+    if let Some(fmt) = detect_format(path) {
+        println!("{}", format_name(&fmt));
+        return 0;
+    }
+
+    println!("unknown");
+    1
 }
 
 // ── validate ─────────────────────────────────────────────────────────────────
@@ -635,14 +724,27 @@ fn validate_data(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> {
         Format::Mix => {
             cnc_formats::mix::MixArchive::parse(data)?;
         }
+        Format::Big => {
+            cnc_formats::big::BigArchive::parse(data)?;
+        }
         Format::Shp => {
-            cnc_formats::shp::ShpFile::parse(data)?;
+            let shp = cnc_formats::shp::ShpFile::parse(data)?;
+            let pixel_count = shp.frame_pixel_count();
+            for frame in &shp.frames {
+                let _ = cnc_formats::lcw::decompress(frame.data, pixel_count)?;
+            }
         }
         Format::Pal => {
             cnc_formats::pal::Palette::parse(data)?;
         }
         Format::Aud => {
             cnc_formats::aud::AudFile::parse(data)?;
+        }
+        Format::Lut => {
+            cnc_formats::lut::LutFile::parse(data)?;
+        }
+        Format::Dip => {
+            cnc_formats::dip::DipFile::parse(data)?;
         }
         Format::Tmp => {
             cnc_formats::tmp::TdTmpFile::parse(data)?;
@@ -653,11 +755,17 @@ fn validate_data(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> {
         Format::Vqa => {
             cnc_formats::vqa::VqaFile::parse(data)?;
         }
+        Format::Vqp => {
+            cnc_formats::vqp::VqpFile::parse(data)?;
+        }
         Format::Wsa => {
             cnc_formats::wsa::WsaFile::parse(data)?;
         }
         Format::Fnt => {
             cnc_formats::fnt::FntFile::parse(data)?;
+        }
+        Format::Eng => {
+            cnc_formats::eng::EngFile::parse(data)?;
         }
         Format::Ini => {
             cnc_formats::ini::IniFile::parse(data)?;

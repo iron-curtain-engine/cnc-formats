@@ -12,9 +12,14 @@
 //! | [`pal`]         | `.pal` | 256-color 6-bit VGA palette              |
 //! | [`shp`]         | `.shp` | Keyframe sprite animation frames         |
 //! | [`aud`]         | `.aud` | Westwood IMA ADPCM audio                 |
+//! | [`big`]         | `.big` | EA BIG archive with stored filenames     |
+//! | [`dip`]         | `.dip` | Westwood setup/installer data            |
+//! | [`eng`]         | `.eng` | Westwood language string tables          |
 //! | [`lcw`]         | —      | LCW decompression used by SHP/VQA/WSA    |
+//! | [`lut`]         | `.lut` | Red Alert Chrono Vortex lookup tables    |
 //! | [`tmp`]         | `.tmp` | Terrain tile sets (TD + RA variants)     |
 //! | [`vqa`]         | `.vqa` | VQ video container (IFF chunk-based)     |
+//! | [`vqp`]         | `.vqp` | VQA palette interpolation sidecar tables |
 //! | [`wsa`]         | `.wsa` | LCW + XOR-delta animation                |
 //! | [`fnt`]         | `.fnt` | Bitmap fonts (variable character count)   |
 //! | [`ini`]         | `.ini` | Classic C&C rules file parser             |
@@ -53,12 +58,16 @@
 // only on `error` and `lcw`; there are no circular dependencies.
 
 pub mod aud;
+pub mod big;
 #[cfg(feature = "convert")]
 pub mod convert;
+pub mod dip;
+pub mod eng;
 pub mod error;
 pub mod fnt;
 pub mod ini;
 pub mod lcw;
+pub mod lut;
 pub mod mix;
 #[cfg(feature = "encrypted-mix")]
 pub mod mix_crypt;
@@ -69,6 +78,7 @@ pub mod shp;
 pub mod sniff;
 pub mod tmp;
 pub mod vqa;
+pub mod vqp;
 pub mod wsa;
 
 #[cfg(feature = "miniyaml")]

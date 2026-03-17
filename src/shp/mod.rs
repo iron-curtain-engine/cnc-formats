@@ -64,6 +64,12 @@ const OFFSET_ENTRY_SIZE: usize = 8;
 /// offset-table entry.  The high byte carries the [`ShpFrameFormat`] code.
 const OFFSET_MASK: u32 = 0x00FF_FFFF;
 
+/// V38 cap: maximum number of frames in one SHP file.
+const MAX_FRAME_COUNT: usize = 8192;
+
+/// V38 cap: maximum pixel area of one SHP frame.
+const MAX_FRAME_AREA: usize = 4 * 1024 * 1024;
+
 // ─── Header ──────────────────────────────────────────────────────────────────
 
 /// The 14-byte keyframe animation header at the start of every SHP file.
@@ -260,6 +266,23 @@ impl<'a> ShpFile<'a> {
         let largest_frame_size = read_u16_le(data, 10)?;
         let flags = read_u16_le(data, 12)?;
 
+        if frame_count > MAX_FRAME_COUNT {
+            return Err(Error::InvalidSize {
+                value: frame_count,
+                limit: MAX_FRAME_COUNT,
+                context: "SHP frame count",
+            });
+        }
+
+        let frame_area = (width as usize).saturating_mul(height as usize);
+        if frame_area > MAX_FRAME_AREA {
+            return Err(Error::InvalidSize {
+                value: frame_area,
+                limit: MAX_FRAME_AREA,
+                context: "SHP frame area",
+            });
+        }
+
         let header = ShpHeader {
             frame_count: frame_count as u16,
             x,
@@ -336,6 +359,37 @@ impl<'a> ShpFile<'a> {
             None
         };
 
+        let eof_entry = entries.get(frame_count).ok_or(Error::InvalidOffset {
+            offset: frame_count,
+            bound: entries.len(),
+        })?;
+        if eof_entry.format_byte != 0 || eof_entry.ref_offset != 0 || eof_entry.ref_format != 0 {
+            return Err(Error::InvalidMagic {
+                context: "SHP EOF sentinel",
+            });
+        }
+        let eof_offset = eof_entry.file_offset as usize;
+        if eof_offset < palette_end || eof_offset > data.len() {
+            return Err(Error::InvalidOffset {
+                offset: eof_offset,
+                bound: data.len(),
+            });
+        }
+
+        let padding_entry = entries.get(frame_count + 1).ok_or(Error::InvalidOffset {
+            offset: frame_count + 1,
+            bound: entries.len(),
+        })?;
+        if padding_entry.file_offset != 0
+            || padding_entry.format_byte != 0
+            || padding_entry.ref_offset != 0
+            || padding_entry.ref_format != 0
+        {
+            return Err(Error::InvalidMagic {
+                context: "SHP zero-padding entry",
+            });
+        }
+
         // ── Frame data ─────────────────────────────────────────────────
         // File offsets in the offset table are absolute from the start of
         // the file.  When an embedded palette is present, the offset table
@@ -372,10 +426,15 @@ impl<'a> ShpFile<'a> {
             let end = (next.file_offset & OFFSET_MASK) as usize;
 
             // Validate structural integrity.
-            if start > end || end > data.len() {
+            if start < palette_end || end < palette_end || start > end || end > data.len() {
                 return Err(Error::InvalidOffset {
                     offset: end,
                     bound: data.len(),
+                });
+            }
+            if i == 0 && format != ShpFrameFormat::Lcw {
+                return Err(Error::InvalidMagic {
+                    context: "SHP first frame format",
                 });
             }
             let frame_data = data.get(start..end).ok_or(Error::InvalidOffset {

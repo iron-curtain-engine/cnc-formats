@@ -65,6 +65,25 @@ pub(crate) fn read_u32_le(data: &[u8], offset: usize) -> Result<u32, Error> {
     Ok(u32::from_le_bytes(buf))
 }
 
+/// Reads a big-endian `u32` starting at `offset`.
+///
+/// Returns [`Error::UnexpectedEof`] if fewer than 4 bytes remain at `offset`.
+#[inline]
+pub(crate) fn read_u32_be(data: &[u8], offset: usize) -> Result<u32, Error> {
+    let end = offset.checked_add(4).ok_or(Error::UnexpectedEof {
+        needed: usize::MAX,
+        available: data.len(),
+    })?;
+    let slice = data.get(offset..end).ok_or(Error::UnexpectedEof {
+        needed: end,
+        available: data.len(),
+    })?;
+    // Safe: .get(offset..offset+4) guarantees exactly 4 bytes.
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(slice);
+    Ok(u32::from_be_bytes(buf))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +252,36 @@ mod tests {
                 available: 6
             }
         ));
+    }
+
+    // ── read_u32_be ──────────────────────────────────────────────────────
+
+    /// Reading a big-endian u32 from a valid position.
+    #[test]
+    fn read_u32_be_valid() {
+        assert_eq!(
+            read_u32_be(&[0x12, 0x34, 0x56, 0x78], 0).unwrap(),
+            0x12345678
+        );
+    }
+
+    /// Reading big-endian u32 from an empty slice returns UnexpectedEof.
+    #[test]
+    fn read_u32_be_empty() {
+        let err = read_u32_be(&[], 0).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::UnexpectedEof {
+                needed: 4,
+                available: 0
+            }
+        ));
+    }
+
+    /// Reading big-endian u32 at a non-zero valid offset.
+    #[test]
+    fn read_u32_be_at_offset() {
+        let data = [0x00, 0x00, 0x12, 0x34, 0x56, 0x78];
+        assert_eq!(read_u32_be(&data, 2).unwrap(), 0x12345678);
     }
 }

@@ -245,6 +245,55 @@ fn test_parse_invalid_offset() {
     assert!(matches!(result, Err(Error::InvalidOffset { .. })));
 }
 
+/// Frame offsets before the payload region are rejected.
+///
+/// Why: a random binary can otherwise masquerade as SHP by pointing frame
+/// slices back into the header or offset table.
+#[test]
+fn parse_frame_offset_before_payload_rejected() {
+    let frame_count: u16 = 1;
+    let total_entries = frame_count as usize + EXTRA_OFFSET_ENTRIES;
+    let offset_table_size = total_entries * OFFSET_ENTRY_SIZE;
+    let data_start = (14 + offset_table_size) as u32;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&frame_count.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // x
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // y
+    bytes.extend_from_slice(&2u16.to_le_bytes()); // width
+    bytes.extend_from_slice(&2u16.to_le_bytes()); // height
+    bytes.extend_from_slice(&4u16.to_le_bytes()); // largest
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // flags
+
+    // Frame starts inside the offset table instead of after it.
+    let raw0 = (0x80u32 << 24) | ((data_start - 4) & OFFSET_MASK);
+    bytes.extend_from_slice(&raw0.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    let raw_eof = (data_start + 4) & OFFSET_MASK;
+    bytes.extend_from_slice(&raw_eof.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 8]); // zero-padding entry
+    bytes.extend_from_slice(&[0xFE, 0x04, 0x00, 0xAB]);
+
+    let result = ShpFile::parse(&bytes);
+    assert!(matches!(result, Err(Error::InvalidOffset { .. })));
+}
+
+/// The trailing zero-padding entry must actually be zero.
+#[test]
+fn parse_nonzero_padding_entry_rejected() {
+    let mut bytes = build_shp(2, 2, 0, &[&[0xFE, 0x04, 0x00, 0xAB, 0x80]], None);
+    let padding_start = 14 + 2 * OFFSET_ENTRY_SIZE;
+    if let Some(byte) = bytes.get_mut(padding_start) {
+        *byte = 1;
+    }
+
+    let result = ShpFile::parse(&bytes);
+    assert!(matches!(result, Err(Error::InvalidMagic { .. })));
+}
+
 // ── Error field & Display verification ────────────────────────────────
 
 /// `UnexpectedEof` for a too-short header carries the exact byte counts.

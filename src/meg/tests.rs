@@ -5,16 +5,15 @@ use super::*;
 
 // ─── Helper: Build a MEG archive from in-memory files ────────────────────
 
-/// Construct a valid MEG binary from a list of `(filename, data)` pairs.
+/// Construct a valid legacy-format MEG binary from `(filename, data)` pairs.
 ///
-/// The builder produces the three-section layout:
+/// Layout:
 ///   1. Header (8 bytes)
 ///   2. Filename table (variable)
-///   3. File record table (18 bytes per entry)
-///   4. Data section (concatenated file contents)
+///   3. File record table (20 bytes per entry)
+///   4. Data section (concatenated payloads)
 ///
-/// File records reference filenames by index and use absolute offsets
-/// into the archive for the data section.
+/// This matches the original Petroglyph community-documented format.
 pub(crate) fn build_meg(files: &[(&str, &[u8])]) -> Vec<u8> {
     let count = files.len() as u32;
     let mut buf = Vec::new();
@@ -30,7 +29,7 @@ pub(crate) fn build_meg(files: &[(&str, &[u8])]) -> Vec<u8> {
         buf.extend_from_slice(name.as_bytes());
     }
 
-    // ── Calculate data offsets ────────────────────────────────────────
+    // ── Calculate data offsets ───────────────────────────────────────
     // Data section starts after header + filename table + record table.
     let records_total = files.len() * FILE_RECORD_SIZE;
     let data_start = buf.len() + records_total;
@@ -42,14 +41,14 @@ pub(crate) fn build_meg(files: &[(&str, &[u8])]) -> Vec<u8> {
         offset += data.len();
     }
 
-    // ── File Records ─────────────────────────────────────────────────
-    for (i, (name, data)) in files.iter().enumerate() {
+    // ── File Records ────────────────────────────────────────────────
+    for (i, (_, data)) in files.iter().enumerate() {
         let crc32 = 0u32; // CRC32 not verified during parse
         buf.extend_from_slice(&crc32.to_le_bytes()); // crc32
-        buf.extend_from_slice(&(i as u32).to_le_bytes()); // index
+        buf.extend_from_slice(&(i as u32).to_le_bytes()); // record index
         buf.extend_from_slice(&(data.len() as u32).to_le_bytes()); // size
         buf.extend_from_slice(&offsets[i].to_le_bytes()); // start
-        buf.extend_from_slice(&(name.len() as u16).to_le_bytes()); // name_length
+        buf.extend_from_slice(&(i as u32).to_le_bytes()); // filename index
     }
 
     // ── Data Section ─────────────────────────────────────────────────
@@ -60,12 +59,46 @@ pub(crate) fn build_meg(files: &[(&str, &[u8])]) -> Vec<u8> {
     buf
 }
 
+/// Construct a Remastered-style format 3 MEG archive.
+pub(crate) fn build_remastered_meg(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let count = files.len() as u32;
+    let mut names = Vec::new();
+    for (name, _) in files {
+        names.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        names.extend_from_slice(name.as_bytes());
+    }
+
+    let data_start = REMASTERED_HEADER_SIZE + names.len() + files.len() * FILE_RECORD_SIZE;
+    let mut buf = Vec::with_capacity(data_start);
+    buf.extend_from_slice(&PETRO_FLAG_UNENCRYPTED.to_le_bytes());
+    buf.extend_from_slice(&PETRO_FORMAT_ID.to_le_bytes());
+    buf.extend_from_slice(&(data_start as u32).to_le_bytes());
+    buf.extend_from_slice(&count.to_le_bytes()); // num_files
+    buf.extend_from_slice(&count.to_le_bytes()); // num_filenames
+    buf.extend_from_slice(&(names.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&names);
+
+    let mut offset = data_start as u32;
+    for (i, (_, data)) in files.iter().enumerate() {
+        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+        buf.extend_from_slice(&0u32.to_le_bytes()); // crc32 (ignored)
+        buf.extend_from_slice(&(i as u32).to_le_bytes()); // record index
+        buf.extend_from_slice(&(data.len() as u32).to_le_bytes()); // size
+        buf.extend_from_slice(&offset.to_le_bytes()); // absolute start
+        buf.extend_from_slice(&(i as u16).to_le_bytes()); // filename index
+        offset = offset.saturating_add(data.len() as u32);
+    }
+
+    for (_, data) in files {
+        buf.extend_from_slice(data);
+    }
+
+    buf
+}
+
 // ── Archive parsing tests ────────────────────────────────────────────────
 
-/// Parse an archive with zero files.
-///
-/// Why: an empty MEG archive is valid (unlike MIX where count=0 triggers
-/// extended-format detection).  The parser must handle it without error.
+/// Parse an empty legacy archive.
 #[test]
 fn parse_empty_archive() {
     let bytes = build_meg(&[]);
@@ -74,9 +107,7 @@ fn parse_empty_archive() {
     assert!(archive.entries().is_empty());
 }
 
-/// Parse a single-file archive and retrieve the file by name.
-///
-/// Why: core happy-path test for the entire parse → lookup pipeline.
+/// Parse a single-file legacy archive and retrieve the file by name.
 #[test]
 fn parse_single_file() {
     let content = b"hello, meg world";
@@ -89,9 +120,6 @@ fn parse_single_file() {
 }
 
 /// File lookup is case-insensitive.
-///
-/// Why: MEG filenames are stored in a specific case but lookups should
-/// be case-insensitive to match game engine behaviour.
 #[test]
 fn get_case_insensitive() {
     let content = b"data";
@@ -103,9 +131,7 @@ fn get_case_insensitive() {
     assert_eq!(archive.get("File.Bin"), Some(content.as_ref()));
 }
 
-/// Looking up a nonexistent filename returns `None`, not a panic.
-///
-/// Why: callers must be able to probe for optional files safely.
+/// Looking up a nonexistent filename returns `None`.
 #[test]
 fn get_nonexistent() {
     let bytes = build_meg(&[("PRESENT.BIN", b"x")]);
@@ -113,10 +139,7 @@ fn get_nonexistent() {
     assert_eq!(archive.get("ABSENT.BIN"), None);
 }
 
-/// Multi-file archive: all files can be retrieved with correct content.
-///
-/// Why: verifies that filename indexing, offset calculations, and data
-/// retrieval all work correctly when multiple entries coexist.
+/// Multi-file legacy archive: all files can be retrieved with correct content.
 #[test]
 fn parse_multiple_files() {
     let files: &[(&str, &[u8])] = &[
@@ -135,9 +158,6 @@ fn parse_multiple_files() {
 }
 
 /// Entry metadata (name, offset, size) is correctly populated.
-///
-/// Why: CLI subcommands (list, inspect) depend on entry metadata
-/// being accurate.
 #[test]
 fn entry_metadata_populated() {
     let files: &[(&str, &[u8])] = &[("FOO.TXT", b"bar"), ("BAZ.BIN", b"quux!")];
@@ -153,10 +173,6 @@ fn entry_metadata_populated() {
 }
 
 /// Files with path separators in filenames are preserved.
-///
-/// Why: MEG archives from the Remastered Collection contain path-like
-/// filenames (e.g. "DATA/ART/UNITS.SHP").  The parser must preserve
-/// these as-is without stripping or modifying path components.
 #[test]
 fn filename_with_path_separators() {
     let content = b"nested";
@@ -170,9 +186,6 @@ fn filename_with_path_separators() {
 }
 
 /// Empty file entries (size = 0) are handled correctly.
-///
-/// Why: some MEG archives contain placeholder entries with zero-length
-/// data.  The parser must return an empty slice, not an error.
 #[test]
 fn empty_file_entry() {
     let bytes = build_meg(&[("EMPTY.DAT", b"")]);
@@ -185,9 +198,6 @@ fn empty_file_entry() {
 }
 
 /// Archive with mixed empty and non-empty files.
-///
-/// Why: verifies that zero-length entries don't corrupt offset
-/// calculations for subsequent entries.
 #[test]
 fn mixed_empty_and_nonempty() {
     let files: &[(&str, &[u8])] = &[
@@ -206,9 +216,7 @@ fn mixed_empty_and_nonempty() {
     }
 }
 
-/// Input shorter than the minimum header (8 bytes) returns `UnexpectedEof`.
-///
-/// Why: the parser needs at least 8 bytes for the header.
+/// Input shorter than the minimum header returns `UnexpectedEof`.
 #[test]
 fn parse_too_short() {
     assert!(matches!(
@@ -225,19 +233,38 @@ fn parse_too_short() {
     ));
 }
 
-/// `num_filenames != num_files` → `InvalidMagic`.
+/// Legacy archives may carry different filename and file counts.
 ///
-/// Why: the format requires both counts to match.  A mismatch indicates
-/// a corrupt or non-MEG file.
+/// The parser accepts that as long as every file record points at a valid
+/// filename index.
 #[test]
 fn parse_mismatched_counts() {
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&2u32.to_le_bytes()); // num_filenames = 2
-    bytes.extend_from_slice(&3u32.to_le_bytes()); // num_files = 3 (mismatch)
-    bytes.extend_from_slice(&[0u8; 256]); // padding
+    let names = [
+        ("ONE.DAT", b"one".as_slice()),
+        ("TWO.DAT", b"two".as_slice()),
+    ];
 
-    let result = MegArchive::parse(&bytes);
-    assert!(matches!(result, Err(Error::InvalidMagic { .. })));
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&2u32.to_le_bytes()); // num_filenames
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // num_files
+    for (name, _) in names {
+        bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(name.as_bytes());
+    }
+
+    let record_start = bytes.len();
+    let data_start = record_start + FILE_RECORD_SIZE;
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // crc32
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // record index
+    bytes.extend_from_slice(&3u32.to_le_bytes()); // size
+    bytes.extend_from_slice(&(data_start as u32).to_le_bytes()); // start
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // filename index ("TWO.DAT")
+    bytes.extend_from_slice(b"two");
+
+    let archive = MegArchive::parse(&bytes).unwrap();
+    assert_eq!(archive.file_count(), 1);
+    assert_eq!(archive.entries()[0].name, "TWO.DAT");
+    assert_eq!(archive.get("TWO.DAT"), Some(b"two".as_slice()));
 }
 
 /// V38: entry count exceeding `MAX_MEG_ENTRIES` → `InvalidSize`.
@@ -256,10 +283,7 @@ fn parse_entry_count_exceeds_cap() {
     assert!(matches!(result, Err(Error::InvalidSize { .. })));
 }
 
-/// File record with offset+size exceeding archive length → `InvalidOffset`.
-///
-/// Why: every entry is validated during parsing; without this check a
-/// malformed archive could cause an out-of-bounds slice later.
+/// File record with offset+size exceeding archive length returns `InvalidOffset`.
 #[test]
 fn parse_invalid_offset() {
     // Build a 1-file archive manually with a record whose offset+size
@@ -270,12 +294,13 @@ fn parse_invalid_offset() {
                                                   // Filename table: "A" (1 byte)
     bytes.extend_from_slice(&1u16.to_le_bytes());
     bytes.push(b'A');
-    // File record: crc=0, index=0, size=9999, start=0, name_len=1
+    // File record: crc=0, index=0, size=9999, start=data_start, name_index=0
+    let data_start = LEGACY_HEADER_SIZE + 3 + FILE_RECORD_SIZE;
     bytes.extend_from_slice(&0u32.to_le_bytes()); // crc32
     bytes.extend_from_slice(&0u32.to_le_bytes()); // index
     bytes.extend_from_slice(&9999u32.to_le_bytes()); // size (too large)
-    bytes.extend_from_slice(&0u32.to_le_bytes()); // start
-    bytes.extend_from_slice(&1u16.to_le_bytes()); // name_length
+    bytes.extend_from_slice(&(data_start as u32).to_le_bytes()); // start
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // name_index
                                                   // Only 5 bytes of data
     bytes.extend_from_slice(&[0xAA; 5]);
 
@@ -283,10 +308,7 @@ fn parse_invalid_offset() {
     assert!(matches!(result, Err(Error::InvalidOffset { .. })));
 }
 
-/// File record with filename index out of bounds → `InvalidOffset`.
-///
-/// Why: a crafted record could reference a filename table entry that
-/// does not exist, causing a panic without bounds checking.
+/// File record with filename index out of bounds returns `InvalidOffset`.
 #[test]
 fn parse_invalid_filename_index() {
     let mut bytes = Vec::new();
@@ -298,18 +320,17 @@ fn parse_invalid_filename_index() {
     // File record with index=5 (out of bounds, only 1 filename)
     bytes.extend_from_slice(&0u32.to_le_bytes()); // crc32
     bytes.extend_from_slice(&5u32.to_le_bytes()); // index = 5 (invalid)
+    let data_start = LEGACY_HEADER_SIZE + 3 + FILE_RECORD_SIZE;
     bytes.extend_from_slice(&0u32.to_le_bytes()); // size
-    bytes.extend_from_slice(&0u32.to_le_bytes()); // start
-    bytes.extend_from_slice(&1u16.to_le_bytes()); // name_length
+    bytes.extend_from_slice(&(data_start as u32).to_le_bytes()); // start
+    bytes.extend_from_slice(&5u32.to_le_bytes()); // filename index = 5 (invalid)
     bytes.extend_from_slice(&[0u8; 64]); // padding
 
     let result = MegArchive::parse(&bytes);
     assert!(matches!(result, Err(Error::InvalidOffset { .. })));
 }
 
-/// V38: filename length exceeding `MAX_FILENAME_LEN` → `InvalidSize`.
-///
-/// Why: a crafted name_length field could cause excessive allocation.
+/// V38: filename length exceeding `MAX_FILENAME_LEN` returns `InvalidSize`.
 #[test]
 fn parse_filename_length_exceeds_cap() {
     let mut bytes = Vec::new();
@@ -322,4 +343,19 @@ fn parse_filename_length_exceeds_cap() {
 
     let result = MegArchive::parse(&bytes);
     assert!(matches!(result, Err(Error::InvalidSize { .. })));
+}
+
+/// Remastered format 3 archives parse successfully.
+#[test]
+fn parse_remastered_archive() {
+    let content = b"<?xml version=\"1.0\"?><XML/>";
+    let bytes = build_remastered_meg(&[("DATA\\XML\\ATTRIBUTES.XML", content)]);
+    let archive = MegArchive::parse(&bytes).unwrap();
+
+    assert_eq!(archive.file_count(), 1);
+    assert_eq!(archive.entries()[0].name, "DATA\\XML\\ATTRIBUTES.XML");
+    assert_eq!(
+        archive.get("data\\xml\\attributes.xml"),
+        Some(content.as_slice())
+    );
 }

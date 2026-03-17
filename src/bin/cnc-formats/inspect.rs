@@ -25,14 +25,19 @@ pub(crate) fn cmd_inspect(path: &str, explicit: Option<Format>) -> i32 {
 fn inspect_data(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> {
     match fmt {
         Format::Mix => inspect_mix(data),
+        Format::Big => inspect_big(data),
         Format::Shp => inspect_shp(data),
         Format::Pal => inspect_pal(data),
         Format::Aud => inspect_aud(data),
+        Format::Lut => inspect_lut(data),
+        Format::Dip => inspect_dip(data),
         Format::Tmp => inspect_td_tmp(data),
         Format::TmpRa => inspect_ra_tmp(data),
         Format::Vqa => inspect_vqa(data),
+        Format::Vqp => inspect_vqp(data),
         Format::Wsa => inspect_wsa(data),
         Format::Fnt => inspect_fnt(data),
+        Format::Eng => inspect_eng(data),
         Format::Ini => inspect_ini(data),
         #[cfg(feature = "miniyaml")]
         Format::Miniyaml => inspect_miniyaml(data),
@@ -65,6 +70,25 @@ fn inspect_mix(data: &[u8]) -> Result<(), cnc_formats::Error> {
             entry.offset,
             entry.size
         );
+    }
+    Ok(())
+}
+
+fn inspect_big(data: &[u8]) -> Result<(), cnc_formats::Error> {
+    let archive = cnc_formats::big::BigArchive::parse(data)?;
+    let entries = archive.entries();
+    let version = match archive.version() {
+        cnc_formats::big::BigVersion::BigF => "BIGF",
+        cnc_formats::big::BigVersion::Big4 => "BIG4",
+    };
+    println!("BIG archive ({version})");
+    println!("  Entries:    {}", entries.len());
+    let total_size: u64 = entries.iter().map(|e| e.size).sum();
+    println!("  Total data: {} bytes", total_size);
+    println!();
+    println!("  {:>10}  {:>10}  Name", "Offset", "Size");
+    for entry in entries {
+        println!("  {:>10}  {:>10}  {}", entry.offset, entry.size, entry.name);
     }
     Ok(())
 }
@@ -139,6 +163,76 @@ fn inspect_aud(data: &[u8]) -> Result<(), cnc_formats::Error> {
     Ok(())
 }
 
+fn inspect_lut(data: &[u8]) -> Result<(), cnc_formats::Error> {
+    let lut = cnc_formats::lut::LutFile::parse(data)?;
+    let mut min_value = u8::MAX;
+    let mut max_value = 0u8;
+    for entry in &lut.entries {
+        if entry.value < min_value {
+            min_value = entry.value;
+        }
+        if entry.value > max_value {
+            max_value = entry.value;
+        }
+    }
+
+    println!("LUT lookup table");
+    println!("  Entries:     {}", lut.entry_count());
+    println!("  Value range: {}..{}", min_value, max_value);
+    if let Some(first) = lut.entries.first() {
+        println!(
+            "  First entry: x={}, y={}, value={}",
+            first.x, first.y, first.value
+        );
+    }
+    Ok(())
+}
+
+fn inspect_dip(data: &[u8]) -> Result<(), cnc_formats::Error> {
+    let dip = cnc_formats::dip::DipFile::parse(data)?;
+    match dip {
+        cnc_formats::dip::DipFile::StringTable(strings) => {
+            println!("DIP installer string table");
+            println!("  Strings:    {}", strings.string_count());
+            println!("  Data start: {} bytes", strings.data_start);
+
+            for string in strings.strings.iter().take(8) {
+                let preview = string.as_lossy_str();
+                let preview = if preview.is_empty() {
+                    "<empty>"
+                } else {
+                    preview.as_ref()
+                };
+                println!("  [{:>4}] {}", string.index, preview);
+            }
+
+            if strings.string_count() > 8 {
+                println!("  ... ({} more strings)", strings.string_count() - 8);
+            }
+        }
+        cnc_formats::dip::DipFile::Segmented(segmented) => {
+            println!("DIP installer segmented data");
+            println!("  Sections:    {}", segmented.section_count);
+            println!("  Header size: {} bytes", segmented.header_size);
+            for section in &segmented.sections {
+                println!(
+                    "  Section {:>2}: {}..{} ({} bytes)",
+                    section.index,
+                    section.start,
+                    section.end,
+                    section.data.len()
+                );
+            }
+            if segmented.trailer.len() == 2 {
+                let trailer = u16::from_le_bytes([segmented.trailer[0], segmented.trailer[1]]);
+                println!("  Trailer:     0x{trailer:04X}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn inspect_td_tmp(data: &[u8]) -> Result<(), cnc_formats::Error> {
     let tmp = cnc_formats::tmp::TdTmpFile::parse(data)?;
     let h = &tmp.header;
@@ -196,6 +290,25 @@ fn inspect_vqa(data: &[u8]) -> Result<(), cnc_formats::Error> {
     Ok(())
 }
 
+fn inspect_vqp(data: &[u8]) -> Result<(), cnc_formats::Error> {
+    let vqp = cnc_formats::vqp::VqpFile::parse(data)?;
+    println!("VQP palette interpolation tables");
+    println!("  Tables:      {}", vqp.num_tables);
+    println!(
+        "  Table size:  {} bytes packed",
+        cnc_formats::vqp::VQP_TABLE_SIZE
+    );
+    println!("  Expanded:    {} bytes per table", 256usize * 256usize);
+
+    if let Some(first) = vqp.tables.first() {
+        println!("  Sample[0,0]: {}", first.get(0, 0));
+        println!("  Sample[1,0]: {}", first.get(1, 0));
+        println!("  Sample[1,1]: {}", first.get(1, 1));
+    }
+
+    Ok(())
+}
+
 fn inspect_wsa(data: &[u8]) -> Result<(), cnc_formats::Error> {
     let wsa = cnc_formats::wsa::WsaFile::parse(data)?;
     let h = &wsa.header;
@@ -231,6 +344,29 @@ fn inspect_fnt(data: &[u8]) -> Result<(), cnc_formats::Error> {
     println!("  Max height:  {} px", h.max_height);
     println!("  Max width:   {} px", h.max_width);
     println!("  Glyphs:      {} ({} non-empty)", h.num_chars, non_empty);
+    Ok(())
+}
+
+fn inspect_eng(data: &[u8]) -> Result<(), cnc_formats::Error> {
+    let eng = cnc_formats::eng::EngFile::parse(data)?;
+    println!("ENG string table");
+    println!("  Strings:    {}", eng.string_count());
+    println!("  Data start: {} bytes", eng.data_start);
+
+    for string in eng.strings.iter().take(8) {
+        let preview = string.as_lossy_str();
+        let preview = if preview.is_empty() {
+            "<empty>"
+        } else {
+            preview.as_ref()
+        };
+        println!("  [{:>4}] {}", string.index, preview);
+    }
+
+    if eng.string_count() > 8 {
+        println!("  ... ({} more strings)", eng.string_count() - 8);
+    }
+
     Ok(())
 }
 

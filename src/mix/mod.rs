@@ -5,6 +5,8 @@
 //!
 //! A MIX file is a **flat archive** where files are identified by a CRC hash of
 //! their uppercase filename — there is no filename table stored on disk.
+//! The CRC is a lookup key derived from the filename text, not a checksum of
+//! the file contents.
 //!
 //! ## File Layout (Basic Format)
 //!
@@ -47,6 +49,8 @@
 //! ```
 //!
 //! Partial trailing bytes (< 4) are zero-padded before the final accumulation.
+//! This CRC is used to find an entry in the archive index; it does not verify
+//! the contents stored at that entry.
 //!
 //! ## References
 //!
@@ -61,18 +65,106 @@ pub mod metadata;
 use crate::error::Error;
 use crate::read::{read_u16_le, read_u32_le};
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::sync::OnceLock;
 
-/// Builds a CRC→filename lookup map from the built-in TD/RA1 filename database.
+const RA2_FILENAME_CANDIDATES: &str = include_str!("known_names_ra2.txt");
+
+#[derive(Debug)]
+struct BuiltinNameDb {
+    names: HashMap<MixCrc, &'static str>,
+    ambiguous_crc_count: usize,
+}
+
+static BUILTIN_NAME_DB: OnceLock<BuiltinNameDb> = OnceLock::new();
+
+/// Summary of the built-in MIX filename resolver corpus.
 ///
-/// Contains ~3,900 known filenames compiled into the binary.  This is
-/// useful as a default name map when the user doesn't supply `--names`.
+/// Built-in names come from candidate filename corpora, not authoritative
+/// archive metadata.  Any CRC that maps to multiple candidates is treated as
+/// ambiguous and omitted from [`builtin_name_map()`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinNameStats {
+    /// Number of CRCs that resolve to a single built-in filename candidate.
+    pub resolved_crc_count: usize,
+    /// Number of CRCs omitted because the candidate corpus collided.
+    pub ambiguous_crc_count: usize,
+}
+
+/// Builds a CRC→filename lookup map from the built-in filename databases.
+///
+/// Built-in names are sourced from vendored TD/RA1 and RA2 filename corpora.
+/// The corpora are candidate lists, not authoritative archive metadata, so the
+/// resolver only keeps CRCs that map to exactly one candidate name.  Any
+/// ambiguous CRC collision is omitted instead of depending on list order.
+///
+/// This is useful as a default name map when the user doesn't supply
+/// `--names`.
 pub fn builtin_name_map() -> HashMap<MixCrc, String> {
-    let mut map = HashMap::with_capacity(known_names::KNOWN_FILENAMES.len());
-    for &name in known_names::KNOWN_FILENAMES {
-        map.insert(crc(name), name.to_string());
+    builtin_name_db()
+        .names
+        .iter()
+        .map(|(&crc, &name)| (crc, name.to_string()))
+        .collect()
+}
+
+/// Returns counts for the built-in MIX filename resolver.
+pub fn builtin_name_stats() -> BuiltinNameStats {
+    let db = builtin_name_db();
+    BuiltinNameStats {
+        resolved_crc_count: db.names.len(),
+        ambiguous_crc_count: db.ambiguous_crc_count,
     }
-    map
+}
+
+fn builtin_name_db() -> &'static BuiltinNameDb {
+    BUILTIN_NAME_DB.get_or_init(build_builtin_name_db)
+}
+
+fn build_builtin_name_db() -> BuiltinNameDb {
+    let mut names = HashMap::with_capacity(
+        known_names::KNOWN_FILENAMES.len() + RA2_FILENAME_CANDIDATES.lines().count(),
+    );
+    let mut ambiguous = HashSet::new();
+
+    for &name in known_names::KNOWN_FILENAMES {
+        insert_builtin_candidate(&mut names, &mut ambiguous, name);
+    }
+    for line in RA2_FILENAME_CANDIDATES.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        insert_builtin_candidate(&mut names, &mut ambiguous, trimmed);
+    }
+
+    BuiltinNameDb {
+        names,
+        ambiguous_crc_count: ambiguous.len(),
+    }
+}
+
+fn insert_builtin_candidate(
+    names: &mut HashMap<MixCrc, &'static str>,
+    ambiguous: &mut HashSet<MixCrc>,
+    name: &'static str,
+) {
+    let key = crc(name);
+    if ambiguous.contains(&key) {
+        return;
+    }
+
+    match names.entry(key) {
+        Entry::Vacant(slot) => {
+            slot.insert(name);
+        }
+        Entry::Occupied(slot) => {
+            if slot.get() != &name {
+                slot.remove();
+                ambiguous.insert(key);
+            }
+        }
+    }
 }
 
 /// V38 safety cap: maximum number of entries in a MIX archive.
@@ -124,6 +216,9 @@ impl core::fmt::Display for MixCrc {
 /// ```
 ///
 /// Partial groups are zero-padded on the right.
+///
+/// This is a hash of the filename text used for archive lookup, not a checksum
+/// of file contents.
 ///
 /// ## Allocation
 ///
@@ -462,6 +557,19 @@ impl<'a> MixArchive<'a> {
     pub fn get_by_crc(&self, key: MixCrc) -> Option<&'a [u8]> {
         let idx = self.entries.binary_search_by_key(&key, |e| e.crc).ok()?;
         let entry = self.entries.get(idx)?;
+        let start = entry.offset as usize;
+        let end = start.saturating_add(entry.size as usize);
+        self.data.get(start..end)
+    }
+
+    /// Returns the file data for the entry at `index`, or `None` if out of range.
+    ///
+    /// Unlike [`MixArchive::get_by_crc`], this preserves duplicate CRC entries:
+    /// callers can retrieve each physical SubBlock payload exactly as stored in
+    /// the archive.
+    #[inline]
+    pub fn get_by_index(&self, index: usize) -> Option<&'a [u8]> {
+        let entry = self.entries.get(index)?;
         let start = entry.offset as usize;
         let end = start.saturating_add(entry.size as usize);
         self.data.get(start..end)
