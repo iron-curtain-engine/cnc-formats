@@ -22,14 +22,16 @@
 </p>
 
 Clean-room binary format parsers for Command & Conquer game files, plus the
-`cncf` command-line utility.
+`cncf` command-line tool. Supports Red Alert, Tiberian Dawn, and related
+C&C titles — see the full format list below.
 
-Parses `.mix` and `.big` archives, `.shp` sprites, `.pal` palettes, `.aud` audio,
-`.lut` Chrono Vortex lookup tables, `.vqa` video, `.vqp` palette interpolation sidecars, `.tmp` terrain tiles,
-`.wsa` animations, `.fnt` bitmap fonts, `.eng` string tables, `.dip` special effects palettes,
-`.ini` rules files, and LCW-compressed data used by Red Alert, Tiberian Dawn,
-and related C&C titles. Optional feature flags add MiniYAML, MIDI, ADL,
-XMIDI, PCM-to-MIDI transcription, and Petroglyph MEG/PGM archive support.
+<p align="center">
+  <a href="https://github.com/iron-curtain-engine/cnc-formats/releases/latest">
+    <img src="https://img.shields.io/github/v/release/iron-curtain-engine/cnc-formats?label=📥%20Download%20Latest%20Release&style=for-the-badge&color=brightgreen" alt="Download Latest Release">
+  </a>
+  <br>
+  <sub>Pre-built binaries for Windows, macOS, and Linux — or <code>cargo install cnc-formats</code></sub>
+</p>
 
 ## Status
 
