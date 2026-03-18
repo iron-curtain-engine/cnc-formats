@@ -21,27 +21,27 @@ Petroglyph Remastered titles.
 ### CLI tool
 
 ```bash
-cargo install cnc-formats --features cli
+cargo install cnc-formats --version 0.1.0-alpha.1
 ```
 
-This installs the `cncf` binary with all format support enabled.
+This installs the `cncf` binary with all default format support enabled.
 
 ### As a library dependency
 
 ```toml
-# Cargo.toml — add only the features you need
+# Cargo.toml — while the crate is prerelease, specify the explicit prerelease version
 [dependencies]
-cnc-formats = "0.1"
+cnc-formats = "0.1.0-alpha.1"
 
 # Common feature combinations:
 # Parse MIX archives including encrypted RA1/TS files:
-cnc-formats = { version = "0.1", features = ["encrypted-mix"] }
+cnc-formats = { version = "0.1.0-alpha.1", features = ["encrypted-mix"] }
 
 # Full conversion support (PNG, WAV, AVI, GIF):
-cnc-formats = { version = "0.1", features = ["convert", "encrypted-mix"] }
+cnc-formats = { version = "0.1.0-alpha.1", features = ["convert", "encrypted-mix"] }
 
 # Everything:
-cnc-formats = { version = "0.1", features = ["convert", "encrypted-mix", "miniyaml", "midi", "adl", "xmi", "transcribe", "meg"] }
+cnc-formats = { version = "0.1.0-alpha.1", features = ["convert", "encrypted-mix", "miniyaml", "midi", "adl", "xmi", "transcribe", "meg"] }
 ```
 
 ## Format Reference
