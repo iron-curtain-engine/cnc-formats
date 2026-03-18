@@ -10,6 +10,7 @@
   <a href="https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/audit.yml"><img src="https://github.com/iron-curtain-engine/cnc-formats/actions/workflows/audit.yml/badge.svg" alt="Security Audit"></a>
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg" alt="License"></a>
   <a href="deny.toml"><img src="https://img.shields.io/badge/no_GPL_deps-enforced-brightgreen.svg" alt="No GPL"></a>
+  <a href="https://crates.io/crates/cnc-formats"><img src="https://img.shields.io/crates/v/cnc-formats.svg" alt="crates.io"></a>
 </p>
 
 <p align="center">

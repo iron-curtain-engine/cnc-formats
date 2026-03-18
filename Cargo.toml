@@ -9,6 +9,8 @@ repository = "https://github.com/iron-curtain-engine/cnc-formats"
 keywords = ["cnc", "red-alert", "command-conquer", "parser", "gamedev"]
 categories = ["parser-implementations", "game-development"]
 authors = ["David Krasnitsky <dikaveman@gmail.com>"]
+readme = "README.md"
+exclude = [".github/", "fuzz/", "images/", "skills/", ".agents/"]
 
 [[bin]]
 name = "cncf"
