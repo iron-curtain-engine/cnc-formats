@@ -45,20 +45,20 @@ const MAX_RATIO: usize = 256;
 /// - `out.len()` is checked against `max_output` before every push.
 /// - All source reads go through `read_byte` / `read_word`, which return
 ///   `UnexpectedEof` rather than indexing past the end.
-struct LcwDecoder<'a> {
-    src: &'a [u8],
+struct LcwDecoder<'input> {
+    src: &'input [u8],
     pos: usize,
     out: Vec<u8>,
     max_output: usize,
 }
 
-impl<'a> LcwDecoder<'a> {
+impl<'input> LcwDecoder<'input> {
     /// Creates a new decoder.
     ///
     /// The initial allocation is capped at `min(max_output, src.len() * 256)`
     /// to avoid over-allocating when `max_output` is much larger than what
     /// the input can possibly produce.
-    fn new(src: &'a [u8], max_output: usize) -> Self {
+    fn new(src: &'input [u8], max_output: usize) -> Self {
         let cap = max_output.min(src.len().saturating_mul(MAX_RATIO));
         Self {
             src,

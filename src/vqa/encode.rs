@@ -72,9 +72,9 @@ impl Default for VqaEncodeParams {
 }
 
 /// Optional audio data for VQA encoding.
-pub struct VqaAudioInput<'a> {
+pub struct VqaAudioInput<'input> {
     /// PCM audio samples (signed 16-bit, interleaved for stereo).
-    pub samples: &'a [i16],
+    pub samples: &'input [i16],
     /// Audio sample rate in Hz.
     pub sample_rate: u16,
     /// 1 (mono) or 2 (stereo).
@@ -96,8 +96,8 @@ pub struct VqaAudioInput<'a> {
 ///
 /// - [`Error::InvalidSize`] if dimensions or frame count are invalid.
 /// - [`Error::DecompressionError`] if LCW compression fails.
-pub fn encode_vqa(
-    indexed_frames: &[Vec<u8>],
+pub fn encode_vqa<T: AsRef<[u8]>>(
+    indexed_frames: &[T],
     palette_rgb8: &[u8; 768],
     width: u16,
     height: u16,
@@ -163,6 +163,7 @@ pub fn encode_vqa(
     let mut max_frame_size: usize = 0;
 
     for (frame_idx, pixels) in indexed_frames.iter().enumerate() {
+        let pixels = pixels.as_ref();
         let mut vqfr = Vec::new();
 
         // Emit a full codebook at the start of each groupsize cycle.
@@ -203,7 +204,10 @@ pub fn encode_vqa(
             // Non-keyframe: re-use the last codebook, just emit a new VPT.
             // Rebuild the codebook for this cycle to find nearest entries.
             let cycle_start = (frame_idx / groupsize) * groupsize;
-            let keyframe = indexed_frames.get(cycle_start).unwrap_or(pixels);
+            let keyframe = indexed_frames
+                .get(cycle_start)
+                .map(|frame| frame.as_ref())
+                .unwrap_or(pixels);
             let codebook = build_codebook(
                 keyframe,
                 width as usize,

@@ -140,6 +140,31 @@ fn test_parse_single_file() {
     assert_eq!(got, content);
 }
 
+/// Streaming reader opens the archive without a backing `&[u8]` parser result.
+#[test]
+fn test_stream_reader_reads_single_file() {
+    let content = b"hello, world";
+    let bytes = build_mix(&[("TEST.TXT", content)]);
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = MixArchiveReader::open(cursor).unwrap();
+
+    assert_eq!(archive.file_count(), 1);
+    let got = archive.read("TEST.TXT").unwrap().expect("file not found");
+    assert_eq!(got, content);
+}
+
+/// Streaming reader can copy an entry directly into a writer.
+#[test]
+fn test_stream_reader_copies_entry() {
+    let bytes = build_mix(&[("A.BIN", b"alpha"), ("B.BIN", b"beta")]);
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = MixArchiveReader::open(cursor).unwrap();
+    let mut out = Vec::new();
+
+    assert!(archive.copy_by_index(1, &mut out).unwrap());
+    assert_eq!(out, b"beta");
+}
+
 /// File lookup is case-insensitive (same CRC regardless of case).
 ///
 /// Why: `get()` must uppercase the caller's string before hashing,

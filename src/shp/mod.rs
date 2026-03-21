@@ -43,6 +43,11 @@ use crate::error::Error;
 use crate::lcw;
 use crate::read::{read_u16_le, read_u32_le};
 
+mod encode;
+#[cfg(all(test, feature = "convert"))]
+pub(crate) use encode::build_test_shp_helper;
+pub use encode::encode_frames;
+
 // V38 safety note: the frame_count field is u16 (max 65535), which inherently
 // satisfies a reasonable bound.  No runtime cap constant is needed because
 // the offset-table allocation (frame_count × 8 bytes, max ~512 KB) is small
@@ -150,7 +155,7 @@ pub enum ShpFrameFormat {
 ///
 /// Borrows frame data from the input slice (zero-copy parse).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShpFrame<'a> {
+pub struct ShpFrame<'input> {
     /// Raw bytes for this frame as stored on disk.
     ///
     /// For [`ShpFrameFormat::Lcw`] frames, pass to [`crate::lcw::decompress`].
@@ -160,7 +165,7 @@ pub struct ShpFrame<'a> {
     ///
     /// This is a borrow into the original input slice — no heap copy is made
     /// during parsing.
-    pub data: &'a [u8],
+    pub data: &'input [u8],
     /// Encoding format of this frame.
     pub format: ShpFrameFormat,
     /// For [`ShpFrameFormat::XorLcw`]: the file offset of the reference
@@ -206,17 +211,17 @@ impl ShpFrame<'_> {
 /// input slice.  Parsing allocates only the `Vec` of frame descriptors and
 /// the offset table — the pixel data itself is zero-copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShpFile<'a> {
+pub struct ShpFile<'input> {
     /// File header with frame dimensions and flags.
     pub header: ShpHeader,
     /// Optional embedded palette (768 bytes of 6-bit VGA RGB data).
     /// Borrows directly from the input slice.
-    pub embedded_palette: Option<&'a [u8]>,
+    pub embedded_palette: Option<&'input [u8]>,
     /// All animation frames, in order.
-    pub frames: Vec<ShpFrame<'a>>,
+    pub frames: Vec<ShpFrame<'input>>,
 }
 
-impl<'a> ShpFile<'a> {
+impl<'input> ShpFile<'input> {
     /// Parses an SHP file from a byte slice.
     ///
     /// ## Offset Table Layout
@@ -247,7 +252,7 @@ impl<'a> ShpFile<'a> {
     /// - [`Error::InvalidOffset`] — a frame offset points outside the file.
     /// - [`Error::InvalidMagic`]  — an offset entry has an unrecognised
     ///   format code in its high byte.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
         // ── Header (14 bytes = 7 × u16) ───────────────────────────────────
         // Fields are read as raw little-endian u16.  No field is rejected
         // at this stage — validation happens when offsets are resolved.
@@ -529,142 +534,7 @@ impl<'a> ShpFile<'a> {
     }
 }
 
-// ── SHP Encoder ──────────────────────────────────────────────────────────────
-//
-// Builds a valid SHP binary from palette-indexed pixel frames.  All frames
-// are encoded as LCW keyframes (format 0x80) for simplicity and maximum
-// compatibility.  XOR-delta encoding would reduce file size but is not
-// required for correctness, and LCW-only files are accepted by all known
-// C&C tools and engines.
-//
-// This is a clean-room implementation based on the publicly documented SHP
-// layout (see module-level docs and binary-codecs.md).
-
-/// Encodes palette-indexed pixel frames into a complete SHP file.
-///
-/// Each frame in `frames` must be exactly `width × height` bytes of
-/// palette-indexed pixel data.  All frames are encoded as LCW keyframes
-/// (`ShpFrameFormat::Lcw`, format code 0x80).
-///
-/// Returns the complete SHP file as `Vec<u8>` that [`ShpFile::parse`] can
-/// round-trip.
-///
-/// # Errors
-///
-/// Returns [`Error::InvalidSize`] if any frame has the wrong number of pixels.
-pub fn encode_frames(frames: &[&[u8]], width: u16, height: u16) -> Result<Vec<u8>, Error> {
-    let pixel_count = (width as usize).saturating_mul(height as usize);
-    for (i, frame) in frames.iter().enumerate() {
-        if frame.len() != pixel_count {
-            return Err(Error::InvalidSize {
-                value: frame.len(),
-                limit: pixel_count,
-                context: "SHP frame pixel count mismatch",
-            });
-        }
-        let _ = i; // suppress unused warning; index kept for future diagnostics.
-    }
-
-    let frame_count = frames.len() as u16;
-    let total_entries = (frame_count as usize).saturating_add(EXTRA_OFFSET_ENTRIES);
-    let offset_table_size = total_entries.saturating_mul(OFFSET_ENTRY_SIZE);
-    let header_size = 14usize;
-
-    // LCW-compress each frame.
-    let compressed: Vec<Vec<u8>> = frames.iter().map(|f| lcw::compress(f)).collect();
-
-    let largest = compressed.iter().map(|c| c.len()).max().unwrap_or(0);
-    let data_start = header_size.saturating_add(offset_table_size);
-
-    // Build the file.
-    let total_data: usize = compressed.iter().map(|c| c.len()).sum();
-    let mut out = Vec::with_capacity(data_start.saturating_add(total_data));
-
-    // ── Header (14 bytes) ────────────────────────────────────────────
-    out.extend_from_slice(&frame_count.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes()); // x
-    out.extend_from_slice(&0u16.to_le_bytes()); // y
-    out.extend_from_slice(&width.to_le_bytes());
-    out.extend_from_slice(&height.to_le_bytes());
-    out.extend_from_slice(&(largest as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes()); // flags (no embedded palette)
-
-    // ── Offset table ─────────────────────────────────────────────────
-    // Each entry: u32 (format_byte << 24 | file_offset), u16 ref_offset, u16 ref_format.
-    let mut file_offset = data_start as u32;
-    for c in &compressed {
-        let raw = ((ShpFrameFormat::Lcw as u32) << 24) | (file_offset & OFFSET_MASK);
-        out.extend_from_slice(&raw.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes()); // ref_offset
-        out.extend_from_slice(&0u16.to_le_bytes()); // ref_format
-        file_offset = file_offset.saturating_add(c.len() as u32);
-    }
-    // EOF sentinel: offset = end of all frame data.
-    let eof_raw = file_offset & OFFSET_MASK;
-    out.extend_from_slice(&eof_raw.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    // Zero-padding entry.
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-
-    // ── Frame data ───────────────────────────────────────────────────
-    for c in &compressed {
-        out.extend_from_slice(c);
-    }
-
-    Ok(out)
-}
-
-/// Builds a minimal SHP binary for cross-module testing.
-///
-/// Creates a `width × height` SHP with one LCW keyframe that fills all
-/// pixels with `fill_value`.
-#[cfg(all(test, feature = "convert"))]
-pub(crate) fn build_test_shp_helper(width: u16, height: u16, fill_value: u8) -> Vec<u8> {
-    let pixel_count = (width as usize) * (height as usize);
-    // LCW fill command: 0xFE, count_lo, count_hi, value, 0x80 (end).
-    let lcw = [
-        0xFEu8,
-        pixel_count as u8,
-        (pixel_count >> 8) as u8,
-        fill_value,
-        0x80,
-    ];
-    let frame_count: u16 = 1;
-    let total_entries = frame_count as usize + EXTRA_OFFSET_ENTRIES;
-    let offset_table_size = total_entries * OFFSET_ENTRY_SIZE;
-    let data_start = (14 + offset_table_size) as u32;
-
-    let mut out = Vec::new();
-    let push_u16 = |v: u16, buf: &mut Vec<u8>| buf.extend_from_slice(&v.to_le_bytes());
-    push_u16(frame_count, &mut out);
-    push_u16(0, &mut out);
-    push_u16(0, &mut out);
-    push_u16(width, &mut out);
-    push_u16(height, &mut out);
-    push_u16(lcw.len() as u16, &mut out);
-    push_u16(0, &mut out);
-
-    // Offset entry for frame 0.
-    let raw = ((ShpFrameFormat::Lcw as u32) << 24) | (data_start & OFFSET_MASK);
-    out.extend_from_slice(&raw.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    // EOF sentinel.
-    let eof = (data_start + lcw.len() as u32) & OFFSET_MASK;
-    out.extend_from_slice(&eof.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    // Zero padding.
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-
-    out.extend_from_slice(&lcw);
-    out
-}
-
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_validation;

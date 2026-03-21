@@ -119,6 +119,19 @@ fn parse_single_file() {
     assert_eq!(got, content);
 }
 
+/// Streaming reader loads the MEG index and reads payloads on demand.
+#[test]
+fn stream_reader_reads_single_file() {
+    let content = b"hello, meg world";
+    let bytes = build_meg(&[("TEST.TXT", content)]);
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = MegArchiveReader::open(cursor).unwrap();
+
+    assert_eq!(archive.file_count(), 1);
+    let got = archive.read("TEST.TXT").unwrap().expect("file not found");
+    assert_eq!(got, content);
+}
+
 /// File lookup is case-insensitive.
 #[test]
 fn get_case_insensitive() {
@@ -358,4 +371,116 @@ fn parse_remastered_archive() {
         archive.get("data\\xml\\attributes.xml"),
         Some(content.as_slice())
     );
+}
+
+// ─── Streaming-vs-batch correctness proofs ──────────────────────────────────
+
+/// Proves streaming entry reads are byte-identical to batch for legacy MEG
+/// archives across all access methods (by name, by index).
+#[test]
+fn streaming_reads_match_batch_for_all_entries() {
+    let files: &[(&str, &[u8])] = &[
+        ("DATA\\XML\\ATTRIBUTES.XML", b"<XML>attributes</XML>"),
+        ("ART\\SHADERS\\DEFAULT.FX", &[0xCC; 48]),
+        ("AUDIO\\MUSIC\\THEME.AUD", b"audio-payload"),
+    ];
+    let bytes = build_meg(files);
+
+    let batch = MegArchive::parse(&bytes).unwrap();
+    let mut stream = MegArchiveReader::open(std::io::Cursor::new(&bytes)).unwrap();
+
+    assert_eq!(batch.file_count(), stream.file_count());
+
+    // Compare by index.
+    for i in 0..batch.file_count() {
+        let batch_data = batch.get_by_index(i).unwrap();
+        let stream_data = stream.read_by_index(i).unwrap().unwrap();
+        assert_eq!(batch_data, stream_data.as_slice(), "index {i} mismatch");
+    }
+
+    // Compare by filename (case-insensitive).
+    for (name, _) in files {
+        let batch_data = batch.get(name).unwrap();
+        let stream_data = stream.read(name).unwrap().unwrap();
+        assert_eq!(batch_data, stream_data.as_slice(), "{name} mismatch");
+    }
+}
+
+/// Proves streaming works identically for Remastered format 3 MEG archives.
+#[test]
+fn streaming_reads_match_batch_remastered() {
+    let files: &[(&str, &[u8])] = &[
+        (
+            "DATA\\XML\\GAMEOBJECTS.XML",
+            b"<objects>remastered</objects>",
+        ),
+        ("ART\\SPRITES\\ICONS.DDS", &[0x44, 0x44, 0x53, 0x20]),
+    ];
+    let bytes = build_remastered_meg(files);
+
+    let batch = MegArchive::parse(&bytes).unwrap();
+    let mut stream = MegArchiveReader::open(std::io::Cursor::new(&bytes)).unwrap();
+
+    assert_eq!(batch.file_count(), stream.file_count());
+
+    for i in 0..batch.file_count() {
+        let batch_data = batch.get_by_index(i).unwrap();
+        let stream_data = stream.read_by_index(i).unwrap().unwrap();
+        assert_eq!(
+            batch_data,
+            stream_data.as_slice(),
+            "remastered index {i} mismatch"
+        );
+    }
+
+    for (name, _) in files {
+        let batch_data = batch.get(name).unwrap();
+        let stream_data = stream.read(name).unwrap().unwrap();
+        assert_eq!(
+            batch_data,
+            stream_data.as_slice(),
+            "remastered {name} mismatch"
+        );
+    }
+}
+
+/// Proves `copy_by_index` writes the same bytes as batch `get_by_index`.
+#[test]
+fn streaming_copy_matches_batch_get() {
+    let files: &[(&str, &[u8])] = &[
+        ("CONFIG.MEG", &[0x01; 16]),
+        ("MODELS\\UNIT.W3D", &[0xAB; 96]),
+    ];
+    let bytes = build_meg(files);
+
+    let batch = MegArchive::parse(&bytes).unwrap();
+    let mut stream = MegArchiveReader::open(std::io::Cursor::new(&bytes)).unwrap();
+
+    for i in 0..batch.file_count() {
+        let batch_data = batch.get_by_index(i).unwrap();
+        let mut copied = Vec::new();
+        let found = stream.copy_by_index(i, &mut copied).unwrap();
+        assert!(found, "copy_by_index({i}) should find entry");
+        assert_eq!(copied.as_slice(), batch_data, "copy mismatch at index {i}");
+    }
+}
+
+/// Proves entry metadata is identical between batch and streaming parsers.
+#[test]
+fn streaming_entry_metadata_matches_batch() {
+    let files: &[(&str, &[u8])] = &[
+        ("ALPHA.DAT", b"first"),
+        ("BETA.DAT", b"second-longer"),
+        ("GAMMA.DAT", b"g"),
+    ];
+    let bytes = build_meg(files);
+
+    let batch = MegArchive::parse(&bytes).unwrap();
+    let stream = MegArchiveReader::open(std::io::Cursor::new(&bytes)).unwrap();
+
+    for (b, s) in batch.entries().iter().zip(stream.entries().iter()) {
+        assert_eq!(b.name, s.name, "name mismatch");
+        assert_eq!(b.offset, s.offset, "offset mismatch");
+        assert_eq!(b.size, s.size, "size mismatch");
+    }
 }

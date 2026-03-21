@@ -19,7 +19,7 @@ const MAX_SEGMENT_COUNT: usize = 256;
 
 /// One contiguous segment in a segmented DIP file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DipSection<'a> {
+pub struct DipSection<'input> {
     /// Zero-based section index.
     pub index: usize,
     /// Start byte offset of the section payload.
@@ -27,12 +27,12 @@ pub struct DipSection<'a> {
     /// Exclusive end byte offset of the section payload.
     pub end: usize,
     /// Raw bytes belonging to the section.
-    pub data: &'a [u8],
+    pub data: &'input [u8],
 }
 
 /// Parsed segmented installer-data DIP file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DipSegmentedFile<'a> {
+pub struct DipSegmentedFile<'input> {
     /// Number of section end offsets stored in the header.
     pub section_count: u16,
     /// Total byte length of the header and section table.
@@ -40,14 +40,14 @@ pub struct DipSegmentedFile<'a> {
     /// End offsets for each section, in ascending order.
     pub end_offsets: Vec<usize>,
     /// Contiguous section payloads derived from the end-offset table.
-    pub sections: Vec<DipSection<'a>>,
+    pub sections: Vec<DipSection<'input>>,
     /// Optional trailing control word left after the section data.
-    pub trailer: &'a [u8],
+    pub trailer: &'input [u8],
 }
 
-impl<'a> DipSegmentedFile<'a> {
+impl<'input> DipSegmentedFile<'input> {
     /// Parses the segmented installer-data DIP variant.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
         if data.len() < 8 {
             return Err(Error::UnexpectedEof {
                 needed: 8,
@@ -155,16 +155,16 @@ impl<'a> DipSegmentedFile<'a> {
 
 /// Parsed DIP file, covering both known on-disk variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DipFile<'a> {
+pub enum DipFile<'input> {
     /// Offset-table string data, identical to `.eng` layout.
-    StringTable(EngFile<'a>),
+    StringTable(EngFile<'input>),
     /// Segmented installer-data control/layout file.
-    Segmented(DipSegmentedFile<'a>),
+    Segmented(DipSegmentedFile<'input>),
 }
 
-impl<'a> DipFile<'a> {
+impl<'input> DipFile<'input> {
     /// Parses either supported DIP variant.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
         match DipSegmentedFile::parse(data) {
             Ok(segmented) => Ok(Self::Segmented(segmented)),
             Err(segmented_err) => match EngFile::parse(data) {

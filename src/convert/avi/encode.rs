@@ -26,8 +26,8 @@ use super::{Error, BYTES_PER_PIXEL, MAX_DIMENSION, MAX_FRAME_COUNT};
 /// # Errors
 ///
 /// - [`Error::InvalidSize`] if dimensions or frame count exceed V38 caps.
-pub fn encode_avi(
-    frames: &[Vec<u8>],
+pub fn encode_avi<T: AsRef<[u8]>>(
+    frames: &[T],
     width: u32,
     height: u32,
     fps: u32,
@@ -245,6 +245,7 @@ pub fn encode_avi(
     let mut audio_frame_remainder: u64 = 0;
 
     for rgba in frames {
+        let rgba = rgba.as_ref();
         // ── Audio chunk (before video, for better A/V sync) ──────
         if has_audio && !audio_data.is_empty() {
             let remaining = audio_data.len().saturating_sub(audio_pos);

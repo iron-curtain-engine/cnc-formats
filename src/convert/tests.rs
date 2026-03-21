@@ -457,3 +457,23 @@ fn aud_scomp1_no_chunk_stripping() {
         );
     }
 }
+
+#[test]
+fn aud_reader_to_wav_matches_buffered_conversion() {
+    let adpcm = [0x07u8, 0x70, 0x11, 0x88];
+    let mut aud_bytes = Vec::new();
+    aud_bytes.extend_from_slice(&22050u16.to_le_bytes());
+    aud_bytes.extend_from_slice(&(adpcm.len() as u32).to_le_bytes());
+    aud_bytes.extend_from_slice(&16u32.to_le_bytes());
+    aud_bytes.push(AUD_FLAG_16BIT);
+    aud_bytes.push(SCOMP_WESTWOOD);
+    aud_bytes.extend_from_slice(&adpcm);
+
+    let aud = AudFile::parse(&aud_bytes).unwrap();
+    let expected = aud_to_wav(&aud).unwrap();
+
+    let mut actual = std::io::Cursor::new(Vec::new());
+    aud_reader_to_wav(std::io::Cursor::new(&aud_bytes), &mut actual).unwrap();
+
+    assert_eq!(actual.into_inner(), expected);
+}

@@ -9,12 +9,12 @@ use super::*;
 ///
 /// VQA/IFF uses big-endian sizes, so this helper mirrors the format's
 /// byte order for test construction.
-fn write_u32_be(buf: &mut [u8], offset: usize, value: u32) {
+pub(super) fn write_u32_be(buf: &mut [u8], offset: usize, value: u32) {
     buf[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
 }
 
 /// Writes a little-endian `u16` at the given offset.
-fn write_u16_le(buf: &mut [u8], offset: usize, value: u16) {
+pub(super) fn write_u16_le(buf: &mut [u8], offset: usize, value: u16) {
     buf[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
 
@@ -23,7 +23,7 @@ fn write_u16_le(buf: &mut [u8], offset: usize, value: u16) {
 /// Sets reasonable defaults for a 320×200 video with 10 frames.
 /// `num_frames` is configurable; all other fields use typical RA values.
 /// Field layout matches EA VQAFILE.H `VQAHeader` struct.
-fn build_vqhd(num_frames: u16) -> [u8; 42] {
+pub(super) fn build_vqhd(num_frames: u16) -> [u8; 42] {
     let mut hd = [0u8; 42];
     write_u16_le(&mut hd, 0, 2); // version = 2
     write_u16_le(&mut hd, 2, 0); // flags
@@ -49,7 +49,7 @@ fn build_vqhd(num_frames: u16) -> [u8; 42] {
 ///
 /// The file has the FORM/WVQA envelope wrapping a single VQHD chunk.
 /// Additional chunks can be appended before the FORM size is finalised.
-fn build_vqa_basic(num_frames: u16) -> Vec<u8> {
+pub(super) fn build_vqa_basic(num_frames: u16) -> Vec<u8> {
     let vqhd = build_vqhd(num_frames);
 
     // FORM envelope + VQHD chunk:
@@ -76,7 +76,7 @@ fn build_vqa_basic(num_frames: u16) -> Vec<u8> {
 ///
 /// The FINF chunk contains `num_frames` little-endian u32 entries, each
 /// set to a dummy offset value.
-fn build_vqa_with_finf(num_frames: u16) -> Vec<u8> {
+pub(super) fn build_vqa_with_finf(num_frames: u16) -> Vec<u8> {
     let vqhd = build_vqhd(num_frames);
     let finf_size = (num_frames as usize) * 4;
 
@@ -113,7 +113,7 @@ fn build_vqa_with_finf(num_frames: u16) -> Vec<u8> {
 ///
 /// Why: decoder tests need malformed `CBPZ` and `SND1` payloads that still
 /// live inside a structurally valid VQA container.
-fn build_vqa_with_chunks(
+pub(super) fn build_vqa_with_chunks(
     num_frames: u16,
     groupsize: u8,
     audio: Option<(u16, u8, u8)>,
@@ -510,194 +510,4 @@ fn chunk_past_form_boundary_rejected() {
 
     let result = VqaFile::parse(&data);
     assert!(result.is_err(), "chunk past FORM boundary must be rejected");
-}
-
-// ─── Codec correctness ──────────────────────────────────────────────────────
-
-/// CPL0 palette data is scaled from 6-bit VGA (0–63) to 8-bit (0–255)
-/// using the formula `(v6 << 2) | (v6 >> 4)`.
-///
-/// Why: the naive shift `v6 << 2` maps 63 to 252, not 255, leaving a
-/// visible gap at the bright end of the palette.  The correct formula
-/// fills in the low 2 bits from the high 2 bits: `(63 << 2) | (63 >> 4)`
-/// = `252 | 3` = 255.  A wrong formula would cause washed-out or banded
-/// colours in decoded video frames.
-///
-/// How: builds a minimal VQA with a VQFR chunk containing a CPL0 sub-chunk
-/// (palette entries at indices 0 and 1) and a VPT0 sub-chunk (so a frame is
-/// rendered).  After decoding, the palette is inspected for correct scaling
-/// of boundary values 0 and 63.
-#[test]
-fn palette_6bit_to_8bit_scaling() {
-    // Build a VQHD for a single-block video: 4×2 pixels, block_w=4, block_h=2.
-    let mut vqhd = [0u8; 42];
-    write_u16_le(&mut vqhd, 0, 2); // version = 2
-    write_u16_le(&mut vqhd, 4, 1); // num_frames = 1
-    write_u16_le(&mut vqhd, 6, 4); // width = 4
-    write_u16_le(&mut vqhd, 8, 2); // height = 2
-    vqhd[10] = 4; // block_w
-    vqhd[11] = 2; // block_h
-    vqhd[12] = 15; // fps
-    vqhd[13] = 1; // groupsize = 1
-    write_u16_le(&mut vqhd, 16, 1); // cb_entries = 1
-
-    // CPL0: 768-byte palette.  Entry 0 = (0,0,0), entry 1 = (63,63,63).
-    let mut cpl_data = vec![0u8; 768];
-    cpl_data[3] = 63; // entry 1, red
-    cpl_data[4] = 63; // entry 1, green
-    cpl_data[5] = 63; // entry 1, blue
-
-    // CBF0: codebook with 1 entry of block_w × block_h = 8 bytes.
-    let cbf_data = vec![0u8; 8];
-
-    // VPT0: 1 block × 2 (lo + hi halves).  lo=0, hi=0 → codebook block 0.
-    let vpt_data = vec![0u8; 2];
-
-    // Assemble VQFR payload: CPL0 + CBF0 + VPT0 sub-chunks.
-    let mut vqfr_payload = Vec::new();
-    vqfr_payload.extend_from_slice(b"CPL0");
-    vqfr_payload.extend_from_slice(&(cpl_data.len() as u32).to_be_bytes());
-    vqfr_payload.extend_from_slice(&cpl_data);
-    vqfr_payload.extend_from_slice(b"CBF0");
-    vqfr_payload.extend_from_slice(&(cbf_data.len() as u32).to_be_bytes());
-    vqfr_payload.extend_from_slice(&cbf_data);
-    vqfr_payload.extend_from_slice(b"VPT0");
-    vqfr_payload.extend_from_slice(&(vpt_data.len() as u32).to_be_bytes());
-    vqfr_payload.extend_from_slice(&vpt_data);
-
-    // Build full VQA manually (FORM/WVQA + VQHD + VQFR) to use our
-    // custom VQHD dimensions instead of the default 320×200 helper.
-    let vqhd_chunk_size = vqhd.len();
-    let vqfr_chunk_size = vqfr_payload.len();
-    let form_data_size = 4 // "WVQA"
-        + 8 + vqhd_chunk_size  // VQHD chunk
-        + 8 + vqfr_chunk_size; // VQFR chunk
-
-    let mut data = Vec::new();
-    data.extend_from_slice(b"FORM");
-    data.extend_from_slice(&(form_data_size as u32).to_be_bytes());
-    data.extend_from_slice(b"WVQA");
-    data.extend_from_slice(b"VQHD");
-    data.extend_from_slice(&(vqhd_chunk_size as u32).to_be_bytes());
-    data.extend_from_slice(&vqhd);
-    data.extend_from_slice(b"VQFR");
-    data.extend_from_slice(&(vqfr_chunk_size as u32).to_be_bytes());
-    data.extend_from_slice(&vqfr_payload);
-
-    let vqa = VqaFile::parse(&data).unwrap();
-    let frames = vqa.decode_frames().unwrap();
-    assert_eq!(frames.len(), 1, "expected exactly 1 decoded frame");
-
-    let pal = &frames[0].palette;
-    // Entry 0: value 0 → scaled 0.
-    assert_eq!(pal[0], 0, "6-bit 0 must scale to 8-bit 0 (red)");
-    assert_eq!(pal[1], 0, "6-bit 0 must scale to 8-bit 0 (green)");
-    assert_eq!(pal[2], 0, "6-bit 0 must scale to 8-bit 0 (blue)");
-    // Entry 1: value 63 → scaled 255 (not 252).
-    assert_eq!(pal[3], 255, "6-bit 63 must scale to 8-bit 255 (red)");
-    assert_eq!(pal[4], 255, "6-bit 63 must scale to 8-bit 255 (green)");
-    assert_eq!(pal[5], 255, "6-bit 63 must scale to 8-bit 255 (blue)");
-}
-
-/// CBP codebook update takes effect on the NEXT group's first frame, not
-/// on the frame that provides the last CBP part.
-///
-/// Why: if the codebook is swapped mid-frame (when the last CBP part
-/// arrives), the frame that completes the group renders with the NEW
-/// codebook instead of the OLD one, causing a visible flash every
-/// groupsize frames.  The VQA spec says accumulated CBP data becomes
-/// the active codebook for the next group.
-///
-/// How: build a 2-frame VQA with groupsize=1.  Frame 0 provides CBF0
-/// (codebook A = all pixel 0x01) + VPT0.  Frame 1 provides CBP0
-/// (codebook B = all pixel 0x02) + VPT0.  With correct timing, frame 1
-/// should still use codebook A (pixel 0x01) because the CBP is applied
-/// AFTER the frame renders.
-#[test]
-fn cbp_codebook_deferred_to_next_group() {
-    // VQHD: 4x2 pixels, block_w=4, block_h=2, groupsize=1, 2 frames.
-    let mut vqhd = [0u8; 42];
-    write_u16_le(&mut vqhd, 0, 2); // version
-    write_u16_le(&mut vqhd, 4, 2); // num_frames = 2
-    write_u16_le(&mut vqhd, 6, 4); // width
-    write_u16_le(&mut vqhd, 8, 2); // height
-    vqhd[10] = 4; // block_w
-    vqhd[11] = 2; // block_h
-    vqhd[12] = 15; // fps
-    vqhd[13] = 1; // groupsize = 1
-    write_u16_le(&mut vqhd, 16, 1); // cb_entries = 1
-
-    // Codebook A: 1 entry of 8 bytes, all pixel 0x01.
-    let cb_a = vec![0x01u8; 8];
-    // Codebook B: 1 entry of 8 bytes, all pixel 0x02.
-    let cb_b = vec![0x02u8; 8];
-    // VPT: 1 block, lo=0, hi=0 → codebook block 0.
-    let vpt = vec![0u8; 2];
-
-    // Frame 0: CBF0 (full codebook A) + VPT0.
-    let mut vqfr0 = Vec::new();
-    vqfr0.extend_from_slice(b"CBF0");
-    vqfr0.extend_from_slice(&(cb_a.len() as u32).to_be_bytes());
-    vqfr0.extend_from_slice(&cb_a);
-    vqfr0.extend_from_slice(b"VPT0");
-    vqfr0.extend_from_slice(&(vpt.len() as u32).to_be_bytes());
-    vqfr0.extend_from_slice(&vpt);
-
-    // Frame 1: CBP0 (partial codebook B — groupsize=1, so this completes
-    // immediately) + VPT0.  The CBP must NOT affect this frame's render.
-    let mut vqfr1 = Vec::new();
-    vqfr1.extend_from_slice(b"CBP0");
-    vqfr1.extend_from_slice(&(cb_b.len() as u32).to_be_bytes());
-    vqfr1.extend_from_slice(&cb_b);
-    vqfr1.extend_from_slice(b"VPT0");
-    vqfr1.extend_from_slice(&(vpt.len() as u32).to_be_bytes());
-    vqfr1.extend_from_slice(&vpt);
-
-    // Also need a CPL0 palette (768 bytes, identity mapping).
-    let cpl = vec![0u8; 768];
-    let mut cpl_chunk = Vec::new();
-    cpl_chunk.extend_from_slice(b"CPL0");
-    cpl_chunk.extend_from_slice(&(cpl.len() as u32).to_be_bytes());
-    cpl_chunk.extend_from_slice(&cpl);
-
-    // Prepend CPL to frame 0 so the palette is set.
-    let mut vqfr0_with_cpl = cpl_chunk;
-    vqfr0_with_cpl.extend_from_slice(&vqfr0);
-
-    // Assemble full VQA.
-    let chunks_size = (8 + vqfr0_with_cpl.len()) + (8 + vqfr1.len());
-    let form_data_size = 4 + 8 + 42 + chunks_size;
-    let mut data = Vec::new();
-    data.extend_from_slice(b"FORM");
-    data.extend_from_slice(&(form_data_size as u32).to_be_bytes());
-    data.extend_from_slice(b"WVQA");
-    data.extend_from_slice(b"VQHD");
-    data.extend_from_slice(&42u32.to_be_bytes());
-    data.extend_from_slice(&vqhd);
-    data.extend_from_slice(b"VQFR");
-    data.extend_from_slice(&(vqfr0_with_cpl.len() as u32).to_be_bytes());
-    data.extend_from_slice(&vqfr0_with_cpl);
-    data.extend_from_slice(b"VQFR");
-    data.extend_from_slice(&(vqfr1.len() as u32).to_be_bytes());
-    data.extend_from_slice(&vqfr1);
-
-    let vqa = VqaFile::parse(&data).unwrap();
-    let frames = vqa.decode_frames().unwrap();
-    assert_eq!(frames.len(), 2, "expected 2 decoded frames");
-
-    // Frame 0: rendered with codebook A → all pixels should be 0x01.
-    assert!(
-        frames[0].pixels.iter().all(|&p| p == 0x01),
-        "frame 0 should use codebook A (0x01), got: {:?}",
-        &frames[0].pixels[..8]
-    );
-
-    // Frame 1: should STILL use codebook A (0x01) because the CBP
-    // completes AFTER the frame renders.  If the codebook was swapped
-    // before rendering, pixels would be 0x02.
-    assert!(
-        frames[1].pixels.iter().all(|&p| p == 0x01),
-        "frame 1 should use OLD codebook A (0x01), not new B (0x02); got: {:?}",
-        &frames[1].pixels[..8]
-    );
 }

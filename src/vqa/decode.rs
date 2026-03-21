@@ -35,8 +35,10 @@
 use crate::error::Error;
 use crate::lcw;
 
-use super::snd::{decode_snd0, decode_snd1, decode_snd2};
+use super::render::{render_frame_pixels, VqaRenderGeometry};
+use super::snd_decode::{append_snd0, append_snd1, append_snd2};
 use super::{VqaFile, VqaHeader};
+use std::borrow::Cow;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -78,8 +80,9 @@ pub struct VqaAudio {
 // ─── Decoder State ───────────────────────────────────────────────────────────
 
 /// Internal decoder state that tracks the codebook across frames.
-struct VqaDecoder<'a> {
-    header: &'a VqaHeader,
+#[derive(Debug)]
+pub(crate) struct VqaDecodeState {
+    header: VqaHeader,
     /// Active codebook: a flat byte array of `cb_entries × block_size` bytes.
     /// Each entry is `block_w × block_h` palette-indexed pixels.
     codebook: Vec<u8>,
@@ -111,9 +114,9 @@ enum CbpEncoding {
     Compressed,
 }
 
-impl<'a> VqaDecoder<'a> {
+impl VqaDecodeState {
     /// Creates a new decoder from a parsed VQA header.
-    fn new(header: &'a VqaHeader) -> Self {
+    pub(crate) fn new(header: VqaHeader) -> Self {
         let block_w = (header.block_w as usize).max(1);
         let block_h = (header.block_h as usize).max(1);
         let block_size = block_w.saturating_mul(block_h);
@@ -129,7 +132,7 @@ impl<'a> VqaDecoder<'a> {
         // Default VGA palette: all black.
         let palette = [0u8; 768];
 
-        VqaDecoder {
+        VqaDecodeState {
             header,
             codebook: Vec::new(),
             cbp_buffer: Vec::new(),
@@ -143,20 +146,14 @@ impl<'a> VqaDecoder<'a> {
         }
     }
 
-    /// Processes a VQFR/VQFL container chunk's sub-chunks.
-    ///
-    /// The VQFR chunk itself contains nested sub-chunks (CBF0/CBFZ, CBP0/CBPZ,
-    /// CPL0/CPLZ, VPT0/VPTZ).  This method iterates them and returns a
-    /// decoded frame if a VPT chunk is found.
-    fn decode_frame_chunk(&mut self, data: &[u8]) -> Result<Option<VqaFrame>, Error> {
+    fn process_frame_chunk<T, F>(&mut self, data: &[u8], render: F) -> Result<Option<T>, Error>
+    where
+        F: FnOnce(&mut Self, &[u8]) -> Result<T, Error>,
+    {
         let mut pos: usize = 0;
-        let mut vpt_data: Option<Vec<u8>> = None;
-        // Deferred CBP chunks: accumulate AFTER rendering the current frame
-        // so the new codebook takes effect at the start of the next group,
-        // not during the current frame.
-        let mut deferred_cbp: Vec<(Vec<u8>, CbpEncoding)> = Vec::new();
+        let mut vpt_data: Option<Cow<'_, [u8]>> = None;
+        let mut deferred_cbp: Vec<(&[u8], CbpEncoding)> = Vec::new();
 
-        // Iterate sub-chunks within the VQFR/VQFL payload.
         while pos.saturating_add(8) <= data.len() {
             let fourcc = data
                 .get(pos..pos.saturating_add(4))
@@ -184,25 +181,20 @@ impl<'a> VqaDecoder<'a> {
                     bound: data.len(),
                 })?;
 
-            // Process sub-chunk based on FourCC.
-            // Last byte '0' = uncompressed, 'Z' = LCW-compressed.
             match fourcc {
-                // ── Full codebook ────────────────────────────────────
                 b"CBF0" => {
-                    self.set_codebook(payload.to_vec())?;
+                    self.copy_codebook(payload)?;
                 }
                 b"CBFZ" => {
                     let decompressed = lcw::decompress(payload, MAX_CODEBOOK_SIZE)?;
-                    self.set_codebook(decompressed)?;
+                    self.replace_codebook(decompressed)?;
                 }
-                // ── Partial codebook (deferred until after VPT render) ─
                 b"CBP0" => {
-                    deferred_cbp.push((payload.to_vec(), CbpEncoding::Raw));
+                    deferred_cbp.push((payload, CbpEncoding::Raw));
                 }
                 b"CBPZ" => {
-                    deferred_cbp.push((payload.to_vec(), CbpEncoding::Compressed));
+                    deferred_cbp.push((payload, CbpEncoding::Compressed));
                 }
-                // ── Palette ──────────────────────────────────────────
                 b"CPL0" => {
                     self.set_palette(payload);
                 }
@@ -210,45 +202,67 @@ impl<'a> VqaDecoder<'a> {
                     let decompressed = lcw::decompress(payload, 768)?;
                     self.set_palette(&decompressed);
                 }
-                // ── Vector Pointer Table ─────────────────────────────
                 b"VPT0" => {
-                    vpt_data = Some(payload.to_vec());
+                    vpt_data = Some(Cow::Borrowed(payload));
                 }
                 b"VPTZ" => {
                     let decompressed = lcw::decompress(payload, MAX_VPT_SIZE)?;
-                    vpt_data = Some(decompressed);
+                    vpt_data = Some(Cow::Owned(decompressed));
                 }
-                _ => {
-                    // Unknown sub-chunks: skip silently (permissive parsing).
-                }
+                _ => {}
             }
 
-            // Advance to next sub-chunk (padded to even boundary).
             let padded = chunk_size.saturating_add(chunk_size & 1);
             pos = payload_start.saturating_add(padded);
         }
 
-        // Render the frame FIRST (using the current codebook), THEN apply
-        // any deferred CBP parts.  Per VQA_INFO, the accumulated CBP
-        // codebook takes effect at the start of the next group, not during
-        // the frame that provides the last part.
         let result = if let Some(vpt) = vpt_data {
-            let frame = self.render_frame(&vpt)?;
-            Some(frame)
+            Some(render(self, vpt.as_ref())?)
         } else {
             None
         };
 
-        // Now accumulate deferred CBP chunks (may complete and swap codebook).
         for (cbp_data, encoding) in deferred_cbp {
-            self.accumulate_cbp(&cbp_data, encoding)?;
+            self.accumulate_cbp(cbp_data, encoding)?;
         }
 
         Ok(result)
     }
 
+    /// Processes a VQFR/VQFL container chunk's sub-chunks and allocates the
+    /// next decoded frame when a VPT payload is present.
+    fn decode_frame_chunk(&mut self, data: &[u8]) -> Result<Option<VqaFrame>, Error> {
+        self.process_frame_chunk(data, |decoder, vpt| decoder.render_frame(vpt))
+    }
+
+    /// Processes a VQFR/VQFL container chunk and renders directly into `pixels`.
+    fn decode_frame_chunk_into(&mut self, data: &[u8], pixels: &mut [u8]) -> Result<bool, Error> {
+        Ok(self
+            .process_frame_chunk(data, |decoder, vpt| {
+                decoder.render_frame_into(vpt, pixels)?;
+                Ok(())
+            })?
+            .is_some())
+    }
+
     /// Sets the active codebook from a full CBF payload.
-    fn set_codebook(&mut self, data: Vec<u8>) -> Result<(), Error> {
+    fn copy_codebook(&mut self, data: &[u8]) -> Result<(), Error> {
+        if data.len() > MAX_CODEBOOK_SIZE {
+            return Err(Error::InvalidSize {
+                value: data.len(),
+                limit: MAX_CODEBOOK_SIZE,
+                context: "VQA codebook",
+            });
+        }
+        self.codebook.clear();
+        self.codebook.extend_from_slice(data);
+        self.cbp_buffer.clear();
+        self.cbp_count = 0;
+        self.cbp_encoding = None;
+        Ok(())
+    }
+
+    fn replace_codebook(&mut self, data: Vec<u8>) -> Result<(), Error> {
         if data.len() > MAX_CODEBOOK_SIZE {
             return Err(Error::InvalidSize {
                 value: data.len(),
@@ -297,7 +311,7 @@ impl<'a> VqaDecoder<'a> {
             // the frame data is malformed and must not silently fall back to
             // raw bytes.
             let new_codebook = match self.cbp_encoding.unwrap_or(CbpEncoding::Raw) {
-                CbpEncoding::Raw => self.cbp_buffer.clone(),
+                CbpEncoding::Raw => std::mem::take(&mut self.cbp_buffer),
                 CbpEncoding::Compressed => lcw::decompress(&self.cbp_buffer, MAX_CODEBOOK_SIZE)?,
             };
             self.codebook = new_codebook;
@@ -327,97 +341,110 @@ impl<'a> VqaDecoder<'a> {
         }
     }
 
-    /// Renders a frame from the Vector Pointer Table.
-    ///
-    /// Version 2 layout: the VPT is split into two halves.
-    ///
-    /// - lo_val = vpt\[by * blocks_x + bx\]
-    /// - hi_val = vpt\[blocks_x * blocks_y + by * blocks_x + bx\]
-    ///
-    /// If hi_val == fill_marker → solid fill with color lo_val.
-    /// Otherwise → copy codebook block #(hi_val * 256 + lo_val).
+    fn render_frame_into(&self, vpt: &[u8], pixels: &mut [u8]) -> Result<(), Error> {
+        let geo = VqaRenderGeometry {
+            width: self.header.width as usize,
+            height: self.header.height as usize,
+            block_w: (self.header.block_w as usize).max(1),
+            block_h: (self.header.block_h as usize).max(1),
+            blocks_x: self.blocks_x,
+            blocks_y: self.blocks_y,
+            block_size: self.block_size,
+            fill_marker: self.fill_marker,
+        };
+        render_frame_pixels(&geo, &self.codebook, vpt, pixels)
+    }
+
     fn render_frame(&self, vpt: &[u8]) -> Result<VqaFrame, Error> {
-        let width = self.header.width as usize;
-        let height = self.header.height as usize;
-        let block_w = (self.header.block_w as usize).max(1);
-        let block_h = (self.header.block_h as usize).max(1);
-        let total_blocks = self.blocks_x.saturating_mul(self.blocks_y);
-
-        // VPT must be at least 2 × total_blocks bytes.
-        let needed = total_blocks.saturating_mul(2);
-        if vpt.len() < needed {
-            return Err(Error::UnexpectedEof {
-                needed,
-                available: vpt.len(),
-            });
-        }
-
-        let mut pixels = vec![0u8; width.saturating_mul(height)];
-
-        for by in 0..self.blocks_y {
-            for bx in 0..self.blocks_x {
-                let idx = by.saturating_mul(self.blocks_x).saturating_add(bx);
-                let lo_val = vpt.get(idx).copied().unwrap_or(0);
-                let hi_val = vpt
-                    .get(total_blocks.saturating_add(idx))
-                    .copied()
-                    .unwrap_or(0);
-
-                let block_x = bx.saturating_mul(block_w);
-                let block_y = by.saturating_mul(block_h);
-
-                if hi_val == self.fill_marker {
-                    // Solid fill: every pixel in this block = lo_val.
-                    for row in 0..block_h {
-                        let y = block_y.saturating_add(row);
-                        if y >= height {
-                            break;
-                        }
-                        for col in 0..block_w {
-                            let x = block_x.saturating_add(col);
-                            if x >= width {
-                                break;
-                            }
-                            let dst = y.saturating_mul(width).saturating_add(x);
-                            if let Some(px) = pixels.get_mut(dst) {
-                                *px = lo_val;
-                            }
-                        }
-                    }
-                } else {
-                    // Codebook lookup: block index = hi_val * 256 + lo_val.
-                    let block_index = (hi_val as usize)
-                        .saturating_mul(256)
-                        .saturating_add(lo_val as usize);
-                    let cb_offset = block_index.saturating_mul(self.block_size);
-
-                    for row in 0..block_h {
-                        let y = block_y.saturating_add(row);
-                        if y >= height {
-                            break;
-                        }
-                        for col in 0..block_w {
-                            let x = block_x.saturating_add(col);
-                            if x >= width {
-                                break;
-                            }
-                            let src_off = cb_offset
-                                .saturating_add(row.saturating_mul(block_w).saturating_add(col));
-                            let pixel = self.codebook.get(src_off).copied().unwrap_or(0);
-                            let dst = y.saturating_mul(width).saturating_add(x);
-                            if let Some(px) = pixels.get_mut(dst) {
-                                *px = pixel;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
+        let mut pixels =
+            vec![0u8; (self.header.width as usize).saturating_mul(self.header.height as usize)];
+        self.render_frame_into(vpt, &mut pixels)?;
         Ok(VqaFrame {
             pixels,
             palette: self.palette,
         })
+    }
+
+    #[inline]
+    pub(crate) fn palette(&self) -> &[u8; 768] {
+        &self.palette
+    }
+
+    pub(crate) fn apply_chunk(
+        &mut self,
+        fourcc: &[u8; 4],
+        data: &[u8],
+    ) -> Result<Option<VqaFrame>, Error> {
+        match fourcc {
+            b"VQFR" | b"VQFL" => self.decode_frame_chunk(data),
+            b"CBF0" => {
+                self.copy_codebook(data)?;
+                Ok(None)
+            }
+            b"CBFZ" => {
+                let decompressed = lcw::decompress(data, MAX_CODEBOOK_SIZE)?;
+                self.replace_codebook(decompressed)?;
+                Ok(None)
+            }
+            b"CBP0" => {
+                self.accumulate_cbp(data, CbpEncoding::Raw)?;
+                Ok(None)
+            }
+            b"CBPZ" => {
+                self.accumulate_cbp(data, CbpEncoding::Compressed)?;
+                Ok(None)
+            }
+            b"CPL0" => {
+                self.set_palette(data);
+                Ok(None)
+            }
+            b"CPLZ" => {
+                if let Ok(decompressed) = lcw::decompress(data, 768) {
+                    self.set_palette(&decompressed);
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn apply_chunk_into(
+        &mut self,
+        fourcc: &[u8; 4],
+        data: &[u8],
+        pixels: &mut [u8],
+    ) -> Result<bool, Error> {
+        match fourcc {
+            b"VQFR" | b"VQFL" => self.decode_frame_chunk_into(data, pixels),
+            b"CBF0" => {
+                self.copy_codebook(data)?;
+                Ok(false)
+            }
+            b"CBFZ" => {
+                let decompressed = lcw::decompress(data, MAX_CODEBOOK_SIZE)?;
+                self.replace_codebook(decompressed)?;
+                Ok(false)
+            }
+            b"CBP0" => {
+                self.accumulate_cbp(data, CbpEncoding::Raw)?;
+                Ok(false)
+            }
+            b"CBPZ" => {
+                self.accumulate_cbp(data, CbpEncoding::Compressed)?;
+                Ok(false)
+            }
+            b"CPL0" => {
+                self.set_palette(data);
+                Ok(false)
+            }
+            b"CPLZ" => {
+                if let Ok(decompressed) = lcw::decompress(data, 768) {
+                    self.set_palette(&decompressed);
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
     }
 }
 
@@ -439,7 +466,7 @@ impl VqaFile<'_> {
     /// - [`Error::UnexpectedEof`] if chunk data is truncated.
     /// - [`Error::InvalidSize`] if codebook exceeds V38 size caps.
     pub fn decode_frames(&self) -> Result<Vec<VqaFrame>, Error> {
-        let mut decoder = VqaDecoder::new(&self.header);
+        let mut decoder = VqaDecodeState::new(self.header.clone());
         // V38: cap pre-allocation to prevent DoS from crafted num_frames.
         // 8192 frames at 15 fps > 9 minutes — generous for any real VQA.
         const MAX_VQA_FRAMES: usize = 8192;
@@ -447,38 +474,8 @@ impl VqaFile<'_> {
         let mut frames = Vec::with_capacity(cap);
 
         for chunk in &self.chunks {
-            match &chunk.fourcc {
-                b"VQFR" | b"VQFL" => {
-                    if let Some(frame) = decoder.decode_frame_chunk(chunk.data)? {
-                        frames.push(frame);
-                    }
-                }
-                // Top-level CBF/CBP/CPL chunks (outside VQFR) can exist in
-                // some VQA variants.  Process them to update decoder state.
-                b"CBF0" => {
-                    decoder.set_codebook(chunk.data.to_vec())?;
-                }
-                b"CBFZ" => {
-                    let decompressed = lcw::decompress(chunk.data, MAX_CODEBOOK_SIZE)?;
-                    decoder.set_codebook(decompressed)?;
-                }
-                b"CBP0" => {
-                    decoder.accumulate_cbp(chunk.data, CbpEncoding::Raw)?;
-                }
-                b"CBPZ" => {
-                    decoder.accumulate_cbp(chunk.data, CbpEncoding::Compressed)?;
-                }
-                b"CPL0" => {
-                    decoder.set_palette(chunk.data);
-                }
-                b"CPLZ" => {
-                    if let Ok(decompressed) = lcw::decompress(chunk.data, 768) {
-                        decoder.set_palette(&decompressed);
-                    }
-                }
-                _ => {
-                    // Other chunk types (SND*, FINF, etc.) handled elsewhere.
-                }
+            if let Some(frame) = decoder.apply_chunk(&chunk.fourcc, chunk.data)? {
+                frames.push(frame);
             }
         }
 
@@ -515,31 +512,36 @@ impl VqaFile<'_> {
             match &chunk.fourcc {
                 b"SND0" => {
                     // Raw PCM data.
-                    let samples = decode_snd0(chunk.data, self.header.bits)?;
-                    if all_samples.len().saturating_add(samples.len()) > MAX_AUDIO_TOTAL {
+                    let added = append_snd0(&mut all_samples, chunk.data, self.header.bits)?;
+                    if all_samples.len() > MAX_AUDIO_TOTAL {
                         return Err(Error::InvalidSize {
-                            value: all_samples.len().saturating_add(samples.len()),
+                            value: all_samples.len(),
                             limit: MAX_AUDIO_TOTAL,
                             context: "VQA audio output",
                         });
                     }
-                    all_samples.extend_from_slice(&samples);
+                    if added == 0 {
+                        continue;
+                    }
                 }
                 b"SND1" => {
                     // Westwood ADPCM (8-bit, unsigned).
-                    let samples = decode_snd1(chunk.data)?;
-                    if all_samples.len().saturating_add(samples.len()) > MAX_AUDIO_TOTAL {
+                    let added = append_snd1(&mut all_samples, chunk.data)?;
+                    if all_samples.len() > MAX_AUDIO_TOTAL {
                         return Err(Error::InvalidSize {
-                            value: all_samples.len().saturating_add(samples.len()),
+                            value: all_samples.len(),
                             limit: MAX_AUDIO_TOTAL,
                             context: "VQA audio output",
                         });
                     }
-                    all_samples.extend_from_slice(&samples);
+                    if added == 0 {
+                        continue;
+                    }
                 }
                 b"SND2" => {
                     // IMA ADPCM (16-bit).  State carried across chunks.
-                    let samples = decode_snd2(
+                    let added = append_snd2(
+                        &mut all_samples,
                         chunk.data,
                         stereo,
                         &mut left_sample,
@@ -547,14 +549,16 @@ impl VqaFile<'_> {
                         &mut right_sample,
                         &mut right_index,
                     )?;
-                    if all_samples.len().saturating_add(samples.len()) > MAX_AUDIO_TOTAL {
+                    if all_samples.len() > MAX_AUDIO_TOTAL {
                         return Err(Error::InvalidSize {
-                            value: all_samples.len().saturating_add(samples.len()),
+                            value: all_samples.len(),
                             limit: MAX_AUDIO_TOTAL,
                             context: "VQA audio output",
                         });
                     }
-                    all_samples.extend_from_slice(&samples);
+                    if added == 0 {
+                        continue;
+                    }
                 }
                 _ => {}
             }

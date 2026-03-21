@@ -21,7 +21,7 @@ Petroglyph Remastered titles.
 ### CLI tool
 
 ```bash
-cargo install cnc-formats --version 0.1.0-alpha.1
+cargo install cnc-formats --version 0.1.0-alpha.2
 ```
 
 This installs the `cncf` binary with all default format support enabled.
@@ -31,17 +31,17 @@ This installs the `cncf` binary with all default format support enabled.
 ```toml
 # Cargo.toml — while the crate is prerelease, specify the explicit prerelease version
 [dependencies]
-cnc-formats = "0.1.0-alpha.1"
+cnc-formats = "0.1.0-alpha.2"
 
 # Common feature combinations:
 # Parse MIX archives including encrypted RA1/TS files:
-cnc-formats = { version = "0.1.0-alpha.1", features = ["encrypted-mix"] }
+cnc-formats = { version = "0.1.0-alpha.2", features = ["encrypted-mix"] }
 
 # Full conversion support (PNG, WAV, AVI, GIF):
-cnc-formats = { version = "0.1.0-alpha.1", features = ["convert", "encrypted-mix"] }
+cnc-formats = { version = "0.1.0-alpha.2", features = ["convert", "encrypted-mix"] }
 
 # Everything:
-cnc-formats = { version = "0.1.0-alpha.1", features = ["convert", "encrypted-mix", "miniyaml", "midi", "adl", "xmi", "transcribe", "meg"] }
+cnc-formats = { version = "0.1.0-alpha.2", features = ["convert", "encrypted-mix", "miniyaml", "midi", "adl", "xmi", "transcribe", "meg"] }
 ```
 
 ## Format Reference
@@ -74,8 +74,8 @@ cnc-formats = { version = "0.1.0-alpha.1", features = ["convert", "encrypted-mix
 |---------------|--------------------------------------------|-------------------|
 | `validate`    | Parse and report structural validity       | All formats       |
 | `inspect`     | Dump metadata (entries, dimensions, FPS)   | All formats       |
-| `list`        | Quick archive entry inventory              | MIX, MEG/PGM      |
-| `extract`     | Extract archive entries to files           | MIX, MEG/PGM      |
+| `list`        | Quick archive entry inventory              | MIX, BIG, MEG/PGM |
+| `extract`     | Extract archive entries to files           | MIX, BIG, MEG/PGM |
 | `convert`     | Bidirectional format conversion            | See matrix below  |
 | `check`       | Deep integrity verification                | All (archives get extra checks) |
 | `fingerprint` | SHA-256 hash (sha256sum-compatible)        | Any file          |
@@ -85,6 +85,7 @@ cnc-formats = { version = "0.1.0-alpha.1", features = ["convert", "encrypted-mix
 - `--format <fmt>` — override auto-detected format (REQUIRED for `.tmp`)
 - `--palette <file>` — palette `.pal` file (REQUIRED for SHP/TMP/WSA/FNT visual export)
 - `--output <path>` — output file or directory
+- `--mix-access <stream|eager>` — MIX loading policy for `list` and `extract`
 - `--names <file>` — filename list for MIX CRC resolution
 - `--filter <str>` — extract only matching entries (case-insensitive substring)
 
@@ -164,9 +165,14 @@ the filename text, not a checksum of file contents.
 
 Without any resolution, entries are extracted as `{CRC:08X}.bin`.
 
+`--mix-access stream` is the default. It keeps MIX entry payloads on disk until
+they are needed. `--mix-access eager` loads the full archive into RAM first.
+That choice belongs to the caller's workflow: lower startup memory and less
+up-front waiting, or fewer later disk reads.
+
 ## Rust API Quick Reference
 
-### Core Pattern: Parse from `&[u8]`
+### Core Pattern: Parse from `&[u8]` or stream from readers
 
 All parsers follow the same pattern — `parse(&[u8])` returns a
 `Result<T, cnc_formats::Error>`:
@@ -187,6 +193,53 @@ let anim     = wsa::WsaFile::parse(&data)?;
 let font     = fnt::FntFile::parse(&data)?;
 let strings  = eng::EngFile::parse(&data)?;
 let config   = ini::IniFile::parse(&data)?;
+```
+
+Large containers and classic media also have reader-based incremental APIs so
+callers can preroll small buffers instead of holding a whole movie or long
+audio decode in memory:
+
+```rust
+use cnc_formats::{aud, mix, vqa};
+
+let file = std::fs::File::open("conquer.mix")?;
+let mut archive = mix::MixArchiveReader::open(file)?;
+if let Some(bytes) = archive.read("RULES.INI")? {
+    let ini = cnc_formats::ini::IniFile::parse(&bytes)?;
+}
+
+if let Some(mut entry_reader) = archive.open_entry("CONQUER.ENG")? {
+    let mut eng_bytes = Vec::new();
+    std::io::Read::read_to_end(&mut entry_reader, &mut eng_bytes)?;
+    let strings = cnc_formats::eng::EngFile::parse(&eng_bytes)?;
+    assert!(strings.string_count() > 0);
+}
+
+let file = std::fs::File::open("speech.aud")?;
+let mut audio = aud::AudStream::open_seekable(file)?;
+let info = audio.media_info();
+assert_eq!(info.channels, 1);
+
+let mut pcm = [0i16; 2048];
+let read = audio.read_samples(&mut pcm)?;
+assert!(read <= pcm.len());
+
+let file = std::fs::File::open("intro.vqa")?;
+let mut video = vqa::VqaDecoder::open(file)?;
+let info = video.media_info();
+assert_eq!(info.fps, 15);
+assert_eq!(video.frame_timestamp(0), Some(std::time::Duration::ZERO));
+
+let mut frame = vqa::VqaFrameBuffer::from_media_info(&info);
+if let Some(index) = video.next_frame_into(&mut frame)? {
+    assert_eq!(index, 0);
+}
+
+let mut audio_buf = [0i16; 2048];
+let samples = video.read_audio_samples(&mut audio_buf)?;
+assert!(samples <= audio_buf.len());
+
+video.seek_to_time(std::time::Duration::from_millis(500))?;
 ```
 
 ### MIX Archive Operations
@@ -217,6 +270,10 @@ for entry in archive.entries() {
 
 // Check for embedded XCC filename database
 let embedded = archive.embedded_names();
+
+// Build a mounted overlay index once instead of rescanning every archive.
+let mut overlay = mix::MixOverlayIndex::new();
+overlay.mount_archive("base", archive.entries());
 ```
 
 ### Format Sniffing (unknown files)

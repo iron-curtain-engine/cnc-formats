@@ -3,7 +3,7 @@
 
 //! C&C format → common format export conversions (PNG, WAV, GIF).
 
-use crate::aud::{self, AudFile};
+use crate::aud::{AudFile, AudStream};
 use crate::error::Error;
 use crate::fnt::FntFile;
 use crate::pal::Palette;
@@ -12,6 +12,7 @@ use crate::tmp::{RaTmpFile, TdTmpFile};
 use crate::wsa::WsaFile;
 
 use super::{encode_png, indexed_to_rgba};
+use std::io::{Cursor, Read, Seek, Write};
 
 // ─── SHP → PNG ───────────────────────────────────────────────────────────────
 
@@ -72,26 +73,27 @@ pub fn pal_to_png(palette: &Palette) -> Result<Vec<u8>, Error> {
 ///
 /// - Returns an error if WAV encoding fails (e.g. sample rate of 0).
 pub fn aud_to_wav(aud_file: &AudFile<'_>) -> Result<Vec<u8>, Error> {
-    let stereo = aud_file.header.is_stereo();
-    let channels = if stereo { 2u16 } else { 1u16 };
-    let sample_rate = aud_file.header.sample_rate as u32;
+    let payload = Cursor::new(aud_file.compressed_data);
+    let mut stream = AudStream::from_payload(aud_file.header.clone(), payload);
+    let mut buf = Cursor::new(Vec::new());
+    aud_stream_to_wav(&mut stream, &mut buf)?;
+    Ok(buf.into_inner())
+}
 
-    // V38: cap output samples based on uncompressed size.
-    let max_samples = aud_file.header.uncompressed_size as usize / 2;
+/// Converts an AUD reader to WAV bytes without buffering the whole AUD file.
+pub fn aud_reader_to_wav<R: Read, W: Write + Seek>(reader: R, writer: W) -> Result<(), Error> {
+    let mut stream = AudStream::open(reader)?;
+    aud_stream_to_wav(&mut stream, writer)
+}
 
-    // RA1's SCOMP=99 (IMA ADPCM) uses a chunk-based format:
-    // each chunk has an 8-byte header (u16 compressed_size, u16 output_size,
-    // u32 magic 0x0000DEAF) followed by compressed_size bytes of ADPCM data.
-    // We strip the headers and concatenate the raw ADPCM payloads before
-    // feeding them to the decoder.
-    let adpcm_data = if aud_file.header.compression == 99 {
-        strip_aud_chunk_headers(aud_file.compressed_data)
-    } else {
-        aud_file.compressed_data.to_vec()
-    };
-    let samples = aud::decode_adpcm(&adpcm_data, stereo, max_samples);
-
-    // Use hound to write WAV to an in-memory buffer.
+/// Converts a streaming AUD decoder into WAV written to `writer`.
+pub fn aud_stream_to_wav<R: Read, W: Write + Seek>(
+    stream: &mut AudStream<R>,
+    writer: W,
+) -> Result<(), Error> {
+    let header = stream.header();
+    let channels = if header.is_stereo() { 2u16 } else { 1u16 };
+    let sample_rate = header.sample_rate as u32;
     let spec = hound::WavSpec {
         channels,
         sample_rate,
@@ -99,59 +101,32 @@ pub fn aud_to_wav(aud_file: &AudFile<'_>) -> Result<Vec<u8>, Error> {
         sample_format: hound::SampleFormat::Int,
     };
 
-    let mut buf = std::io::Cursor::new(Vec::new());
-    {
-        let mut writer =
-            hound::WavWriter::new(&mut buf, spec).map_err(|_| Error::DecompressionError {
-                reason: "WAV writer initialization failed",
-            })?;
-        for &sample in &samples {
-            writer
-                .write_sample(sample)
+    let mut wav_writer =
+        hound::WavWriter::new(writer, spec).map_err(|_| Error::DecompressionError {
+            reason: "WAV writer initialization failed",
+        })?;
+    let mut samples = [0i16; 4096];
+
+    loop {
+        let read = stream.read_samples(&mut samples)?;
+        if read == 0 {
+            break;
+        }
+        for sample in samples.get(..read).unwrap_or(&[]) {
+            wav_writer
+                .write_sample(*sample)
                 .map_err(|_| Error::DecompressionError {
                     reason: "WAV writer failed to write sample",
                 })?;
         }
-        writer.finalize().map_err(|_| Error::DecompressionError {
+    }
+
+    wav_writer
+        .finalize()
+        .map_err(|_| Error::DecompressionError {
             reason: "WAV writer finalization failed",
         })?;
-    }
-    Ok(buf.into_inner())
-}
-
-/// Strips 8-byte chunk headers from RA1's SCOMP=99 AUD format.
-///
-/// Each chunk: `u16 compressed_size` + `u16 output_size` + `u32 magic (0xDEAF)`
-/// followed by `compressed_size` bytes of raw IMA ADPCM data.  Returns the
-/// concatenated ADPCM payloads without headers.
-fn strip_aud_chunk_headers(data: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(data.len());
-    let mut pos: usize = 0;
-    while pos.saturating_add(8) <= data.len() {
-        let c_size = u16::from_le_bytes([
-            data.get(pos).copied().unwrap_or(0),
-            data.get(pos + 1).copied().unwrap_or(0),
-        ]) as usize;
-        let magic = u32::from_le_bytes([
-            data.get(pos + 4).copied().unwrap_or(0),
-            data.get(pos + 5).copied().unwrap_or(0),
-            data.get(pos + 6).copied().unwrap_or(0),
-            data.get(pos + 7).copied().unwrap_or(0),
-        ]);
-        if magic != 0x0000_DEAF {
-            // Not a chunk header — treat rest as raw ADPCM data.
-            if let Some(remaining) = data.get(pos..) {
-                result.extend_from_slice(remaining);
-            }
-            break;
-        }
-        let payload_end = pos.saturating_add(8).saturating_add(c_size);
-        if let Some(payload) = data.get(pos + 8..payload_end) {
-            result.extend_from_slice(payload);
-        }
-        pos = payload_end;
-    }
-    result
+    Ok(())
 }
 
 // ─── TMP → PNG ───────────────────────────────────────────────────────────────
@@ -409,6 +384,80 @@ pub fn vqa_to_avi(vqa: &crate::vqa::VqaFile<'_>) -> Result<Vec<u8>, Error> {
     )
 }
 
+// ─── VQA → MKV ──────────────────────────────────────────────────────────────
+
+/// Converts a VQA video file to a Matroska (MKV) container.
+///
+/// Decodes all VQA frames and extracts audio, then muxes them into an MKV
+/// container with `V_UNCOMPRESSED` BGR24 video and `A_PCM/INT/LIT` audio.
+/// The result plays in VLC, ffplay, mpv, etc.
+///
+/// Returns the complete MKV file as `Vec<u8>`.
+///
+/// # Errors
+///
+/// - [`Error::DecompressionError`] if VQA frame decoding fails.
+/// - [`Error::InvalidSize`] if no frames are produced.
+pub fn vqa_to_mkv(vqa: &crate::vqa::VqaFile<'_>) -> Result<Vec<u8>, Error> {
+    let decoded_frames = vqa.decode_frames()?;
+    if decoded_frames.is_empty() {
+        return Err(Error::DecompressionError {
+            reason: "VQA produced no decoded frames",
+        });
+    }
+
+    let width = vqa.header.width as u32;
+    let height = vqa.header.height as u32;
+    let fps = (vqa.header.fps as u32).max(1);
+
+    // Convert palette-indexed frames to RGBA for MKV encoding.
+    let mut rgba_frames: Vec<Vec<u8>> = Vec::with_capacity(decoded_frames.len());
+    for frame in &decoded_frames {
+        let pixel_count = frame.pixels.len();
+        let mut rgba = Vec::with_capacity(pixel_count.saturating_mul(4));
+        for &idx in &frame.pixels {
+            let base = (idx as usize).saturating_mul(3);
+            let r = frame.palette.get(base).copied().unwrap_or(0);
+            let g = frame
+                .palette
+                .get(base.saturating_add(1))
+                .copied()
+                .unwrap_or(0);
+            let b = frame
+                .palette
+                .get(base.saturating_add(2))
+                .copied()
+                .unwrap_or(0);
+            rgba.push(r);
+            rgba.push(g);
+            rgba.push(b);
+            rgba.push(255);
+        }
+        rgba_frames.push(rgba);
+    }
+
+    // Extract audio (if present).
+    let audio = vqa.extract_audio()?;
+    let (audio_ref, sample_rate, channels) = match &audio {
+        Some(a) => (
+            Some(a.samples.as_slice()),
+            a.sample_rate as u32,
+            a.channels as u16,
+        ),
+        None => (None, 0, 0),
+    };
+
+    super::mkv::encode_mkv(
+        &rgba_frames,
+        width,
+        height,
+        fps,
+        audio_ref,
+        sample_rate,
+        channels,
+    )
+}
+
 // ─── GIF encoding helper ─────────────────────────────────────────────────────
 
 /// Encodes palette-indexed animation frames as an animated GIF.
@@ -416,8 +465,8 @@ pub fn vqa_to_avi(vqa: &crate::vqa::VqaFile<'_>) -> Result<Vec<u8>, Error> {
 /// Each frame is a flat `Vec<u8>` of palette indices (w × h bytes).
 /// The palette is an array of 256 RGB triplets in 8-bit range.
 /// Index 0 is the transparent color.
-fn encode_animated_gif(
-    frames: &[Vec<u8>],
+fn encode_animated_gif<T: AsRef<[u8]>>(
+    frames: &[T],
     width: u16,
     height: u16,
     rgb8_palette: &[[u8; 3]; 256],
@@ -448,6 +497,7 @@ fn encode_animated_gif(
             })?;
 
         for indexed_pixels in frames {
+            let indexed_pixels = indexed_pixels.as_ref();
             let frame = gif::Frame {
                 width,
                 height,

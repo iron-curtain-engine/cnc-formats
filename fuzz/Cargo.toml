@@ -15,7 +15,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.cnc-formats]
 path = ".."
-features = ["miniyaml"]
+features = ["miniyaml", "meg"]
 
 # One target per format module, as required by V38.
 
@@ -72,6 +72,71 @@ doc = false
 [[bin]]
 name = "fuzz_miniyaml"
 path = "fuzz_targets/fuzz_miniyaml.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_csf"
+path = "fuzz_targets/fuzz_csf.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_cps"
+path = "fuzz_targets/fuzz_cps.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_w3d"
+path = "fuzz_targets/fuzz_w3d.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_hva"
+path = "fuzz_targets/fuzz_hva.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_vxl"
+path = "fuzz_targets/fuzz_vxl.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_shp_ts"
+path = "fuzz_targets/fuzz_shp_ts.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_tmp_ts"
+path = "fuzz_targets/fuzz_tmp_ts.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_big"
+path = "fuzz_targets/fuzz_big.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_dip"
+path = "fuzz_targets/fuzz_dip.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_eng"
+path = "fuzz_targets/fuzz_eng.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_lut"
+path = "fuzz_targets/fuzz_lut.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_vqp"
+path = "fuzz_targets/fuzz_vqp.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_meg"
+path = "fuzz_targets/fuzz_meg.rs"
 doc = false
 
 [workspace]

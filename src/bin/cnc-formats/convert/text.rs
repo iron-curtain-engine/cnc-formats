@@ -5,8 +5,12 @@
 
 use super::Format;
 
-/// Convert a MiniYAML file to standard YAML and write to stdout.
-pub(super) fn convert_miniyaml_to_yaml(path: &str, explicit_format: Option<Format>) -> i32 {
+/// Convert a MiniYAML file to standard YAML and write it to a file or stdout.
+pub(super) fn convert_miniyaml_to_yaml(
+    path: &str,
+    explicit_format: Option<Format>,
+    output_path: Option<&str>,
+) -> i32 {
     // Auto-detect or require explicit format for ambiguous extensions.
     let fmt = explicit_format.map(|_| ());
     let is_miniyaml = fmt.is_some()
@@ -43,11 +47,47 @@ pub(super) fn convert_miniyaml_to_yaml(path: &str, explicit_format: Option<Forma
     match cnc_formats::miniyaml::MiniYamlDoc::parse_str(&input) {
         Ok(doc) => {
             let yaml = cnc_formats::miniyaml::to_yaml(&doc);
-            print!("{yaml}");
-            0
+            match resolve_yaml_output(path, output_path) {
+                Some(out) => write_yaml_file(&out, &yaml),
+                None => {
+                    print!("{yaml}");
+                    0
+                }
+            }
         }
         Err(e) => {
             super::super::report_parse_error(path, &e);
+            1
+        }
+    }
+}
+
+fn resolve_yaml_output(path: &str, output_path: Option<&str>) -> Option<String> {
+    if let Some(output_path) = output_path {
+        return Some(output_path.to_string());
+    }
+    if path == "-" {
+        return None;
+    }
+
+    let derived = match path.rsplit_once('.') {
+        Some((stem, _)) => format!("{stem}.yaml"),
+        None => format!("{path}.yaml"),
+    };
+    if derived == path {
+        return None;
+    }
+    Some(derived)
+}
+
+fn write_yaml_file(path: &str, yaml: &str) -> i32 {
+    match std::fs::write(path, yaml.as_bytes()) {
+        Ok(()) => {
+            println!("Wrote {} bytes to {path}", yaml.len());
+            0
+        }
+        Err(e) => {
+            eprintln!("Error writing {path}: {e}");
             1
         }
     }

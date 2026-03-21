@@ -37,6 +37,12 @@
 
 use crate::error::Error;
 use crate::read::{read_u16_le, read_u32_le, read_u8};
+use std::time::Duration;
+
+mod info;
+mod stream;
+pub use info::{AudMediaInfo, AudSeekSupport};
+pub use stream::{AudPcmChunk, AudStream};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 //
@@ -57,6 +63,9 @@ pub const SCOMP_WESTWOOD: u8 = 1;
 pub const SCOMP_SONARC: u8 = 33;
 /// Compression algorithm identifier: SOS ADPCM.
 pub const SCOMP_SOS: u8 = 99;
+
+/// Fixed size of the AUD file header in bytes.
+pub(crate) const AUD_HEADER_SIZE: usize = 12;
 
 // ─── IMA ADPCM Tables ─────────────────────────────────────────────────────────
 //
@@ -132,20 +141,88 @@ impl AudHeader {
     pub fn is_16bit(&self) -> bool {
         self.flags & AUD_FLAG_16BIT != 0
     }
+
+    /// Returns the number of audio channels implied by the flags.
+    #[inline]
+    pub fn channel_count(&self) -> u8 {
+        if self.is_stereo() {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Returns the decoded sample-frame count implied by `uncompressed_size`.
+    ///
+    /// This counts interleaved stereo pairs as one sample frame.
+    #[inline]
+    pub fn sample_frames(&self) -> usize {
+        let bytes_per_sample = if self.is_16bit() { 2usize } else { 1usize };
+        let bytes_per_frame = bytes_per_sample.saturating_mul(self.channel_count() as usize);
+        (self.uncompressed_size as usize) / bytes_per_frame.max(1)
+    }
+
+    /// Returns the nominal playback duration implied by the header.
+    #[inline]
+    pub fn duration(&self) -> Option<Duration> {
+        if self.sample_rate == 0 {
+            return None;
+        }
+
+        let frames = self.sample_frames() as u64;
+        let secs = frames / u64::from(self.sample_rate);
+        let nanos = ((frames % u64::from(self.sample_rate)) * 1_000_000_000u64)
+            / u64::from(self.sample_rate);
+        Some(Duration::new(secs, nanos as u32))
+    }
+
+    /// Returns the playback timestamp of `sample_frame`.
+    ///
+    /// The timestamp is relative to the start of the stream and counts
+    /// interleaved stereo pairs as one sample frame.
+    #[inline]
+    pub fn sample_frame_timestamp(&self, sample_frame: u64) -> Option<Duration> {
+        if self.sample_rate == 0 {
+            return None;
+        }
+
+        let secs = sample_frame / u64::from(self.sample_rate);
+        let nanos = ((sample_frame % u64::from(self.sample_rate)) * 1_000_000_000u64)
+            / u64::from(self.sample_rate);
+        Some(Duration::new(secs, nanos as u32))
+    }
+}
+
+/// Parses the fixed-size AUD header fields from raw bytes.
+pub(crate) fn parse_header_bytes(data: &[u8]) -> Result<AudHeader, Error> {
+    if data.len() < AUD_HEADER_SIZE {
+        return Err(Error::UnexpectedEof {
+            needed: AUD_HEADER_SIZE,
+            available: data.len(),
+        });
+    }
+
+    Ok(AudHeader {
+        sample_rate: read_u16_le(data, 0)?,
+        compressed_size: read_u32_le(data, 2)?,
+        uncompressed_size: read_u32_le(data, 6)?,
+        flags: read_u8(data, 10)?,
+        compression: read_u8(data, 11)?,
+    })
 }
 
 // ─── AudFile ─────────────────────────────────────────────────────────────────
 
 /// A parsed AUD file: header plus a reference to the compressed audio bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AudFile<'a> {
+pub struct AudFile<'input> {
     /// Parsed file header.
     pub header: AudHeader,
     /// The compressed audio payload (all bytes after the 12-byte header).
-    pub compressed_data: &'a [u8],
+    pub compressed_data: &'input [u8],
 }
 
-impl<'a> AudFile<'a> {
+impl<'input> AudFile<'input> {
     /// Parses an AUD file from a byte slice.
     ///
     /// The parser reads the 12-byte header, then slices out the compressed
@@ -161,48 +238,30 @@ impl<'a> AudFile<'a> {
     ///
     /// - [`Error::UnexpectedEof`] — `data` is shorter than 12 bytes or shorter
     ///   than the header's declared compressed size.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
-        if data.len() < 12 {
-            return Err(Error::UnexpectedEof {
-                needed: 12,
-                available: data.len(),
-            });
-        }
-        // Safe reads via helpers (defense-in-depth over the upfront check).
-        let sample_rate = read_u16_le(data, 0)?;
-        let compressed_size = read_u32_le(data, 2)?;
-        let uncompressed_size = read_u32_le(data, 6)?;
-        let flags = read_u8(data, 10)?;
-        let compression = read_u8(data, 11)?;
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
+        let header = parse_header_bytes(data)?;
+        let compressed_size = header.compressed_size as usize;
 
         // Validate that the file actually contains the declared compressed data.
         // V38: use saturating_add so `12 + compressed_size` cannot wrap to a
         // small number on 32-bit platforms, which would bypass the length check.
-        let payload = data.get(12..).ok_or(Error::UnexpectedEof {
-            needed: 12,
+        let payload = data.get(AUD_HEADER_SIZE..).ok_or(Error::UnexpectedEof {
+            needed: AUD_HEADER_SIZE,
             available: data.len(),
         })?;
-        if (compressed_size as usize) > payload.len() {
+        if compressed_size > payload.len() {
             return Err(Error::UnexpectedEof {
-                needed: 12usize.saturating_add(compressed_size as usize),
+                needed: AUD_HEADER_SIZE.saturating_add(compressed_size),
                 available: data.len(),
             });
         }
 
         Ok(AudFile {
-            header: AudHeader {
-                sample_rate,
-                compressed_size,
-                uncompressed_size,
-                flags,
-                compression,
-            },
-            compressed_data: payload.get(..compressed_size as usize).ok_or(
-                Error::UnexpectedEof {
-                    needed: 12usize.saturating_add(compressed_size as usize),
-                    available: data.len(),
-                },
-            )?,
+            header,
+            compressed_data: payload.get(..compressed_size).ok_or(Error::UnexpectedEof {
+                needed: AUD_HEADER_SIZE.saturating_add(compressed_size),
+                available: data.len(),
+            })?,
         })
     }
 }
@@ -230,6 +289,7 @@ impl AdpcmChannel {
     ///    bit (3), using the step as the quantiser.
     /// 3. Accumulate `sample += diff`, clamped to `i16` range.
     /// 4. Advance `step_index` by `IMA_INDEX_ADJ[nibble]`, clamped to 0–88.
+    #[inline]
     fn decode_nibble(&mut self, nibble: u8) -> i16 {
         let token = (nibble & 0x0F) as usize;
         // Safe via .get(): step_index is clamped to 0–88 (table has 89 entries).
@@ -354,6 +414,7 @@ impl AdpcmChannel {
     ///
     /// Updates internal state (sample, step_index) identically to
     /// `decode_nibble` so encoder and decoder remain synchronized.
+    #[inline]
     fn encode_nibble(&mut self, sample: i16) -> u8 {
         let step = IMA_STEP_TABLE.get(self.step_index).copied().unwrap_or(7);
         let diff = (sample as i32) - self.sample;
@@ -509,3 +570,6 @@ mod tests;
 
 #[cfg(test)]
 mod tests_validation;
+
+#[cfg(test)]
+mod tests_stream;

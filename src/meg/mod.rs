@@ -36,6 +36,9 @@
 use crate::error::Error;
 use crate::read::{read_u16_le, read_u32_le};
 
+mod stream;
+pub use stream::MegArchiveReader;
+
 /// V38 safety cap: maximum number of entries in a MEG archive.
 ///
 /// Real Remastered archives contain ~3,000 entries; 65,536 is generous
@@ -93,12 +96,12 @@ pub struct MegEntry {
 /// File data is accessed by calling [`MegArchive::get`] with a filename;
 /// the method performs a case-insensitive search over the entry table.
 #[derive(Debug)]
-pub struct MegArchive<'a> {
+pub struct MegArchive<'input> {
     entries: Vec<MegEntry>,
-    data: &'a [u8],
+    data: &'input [u8],
 }
 
-impl<'a> MegArchive<'a> {
+impl<'input> MegArchive<'input> {
     /// Parses a MEG archive from a byte slice.
     ///
     /// Supports `.meg` and `.pgm` files from Petroglyph titles.
@@ -111,7 +114,7 @@ impl<'a> MegArchive<'a> {
     /// - [`Error::InvalidOffset`]  — a file record points outside the archive.
     /// - [`Error::InvalidMagic`]   — the archive uses an unsupported MEG
     ///   variant or encrypted layout.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
         if data.len() < LEGACY_HEADER_SIZE {
             return Err(Error::UnexpectedEof {
                 needed: LEGACY_HEADER_SIZE,
@@ -136,7 +139,8 @@ impl<'a> MegArchive<'a> {
     /// Uses `.get()` for defense-in-depth: entries are validated during
     /// `parse()`, but safe slicing prevents a panic if invariants are
     /// ever broken by a future code change.
-    pub fn get(&self, filename: &str) -> Option<&'a [u8]> {
+    #[inline]
+    pub fn get(&self, filename: &str) -> Option<&'input [u8]> {
         for entry in &self.entries {
             if entry.name.eq_ignore_ascii_case(filename) {
                 let start = entry.offset as usize;
@@ -154,7 +158,8 @@ impl<'a> MegArchive<'a> {
     /// it uses the entry's own offset/size directly, avoiding the
     /// first-match ambiguity of `get()` when an archive contains
     /// duplicate or case-colliding filenames.
-    pub fn get_by_index(&self, index: usize) -> Option<&'a [u8]> {
+    #[inline]
+    pub fn get_by_index(&self, index: usize) -> Option<&'input [u8]> {
         let entry = self.entries.get(index)?;
         let start = entry.offset as usize;
         let end = start.saturating_add(entry.size as usize);
@@ -174,8 +179,8 @@ impl<'a> MegArchive<'a> {
     }
 }
 
-impl<'a> MegArchive<'a> {
-    fn parse_legacy(data: &'a [u8]) -> Result<Self, Error> {
+impl<'input> MegArchive<'input> {
+    fn parse_legacy(data: &'input [u8]) -> Result<Self, Error> {
         let num_filenames = read_u32_le(data, 0)? as usize;
         let num_files = read_u32_le(data, 4)? as usize;
         validate_entry_count(num_filenames, "MEG filename count")?;
@@ -196,7 +201,7 @@ impl<'a> MegArchive<'a> {
         Ok(Self { entries, data })
     }
 
-    fn parse_petroglyph(data: &'a [u8]) -> Result<Self, Error> {
+    fn parse_petroglyph(data: &'input [u8]) -> Result<Self, Error> {
         if data.len() < PETRO_HEADER_SIZE {
             return Err(Error::UnexpectedEof {
                 needed: PETRO_HEADER_SIZE,
@@ -251,7 +256,7 @@ impl<'a> MegArchive<'a> {
     }
 
     fn parse_remastered(
-        data: &'a [u8],
+        data: &'input [u8],
         data_start: usize,
         num_filenames: usize,
         num_files: usize,

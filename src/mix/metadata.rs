@@ -31,6 +31,7 @@
 //! trailing region, so it cannot break any game or existing tool.
 
 use super::MixCrc;
+use crate::read::{read_u16_le, read_u32_le, read_u8};
 use std::collections::HashMap;
 
 /// Magic bytes identifying a CNFM metadata block.
@@ -139,24 +140,34 @@ pub fn parse_cnfm(trailing: &[u8]) -> HashMap<MixCrc, CnfmEntry> {
     if trailing.get(..4) != Some(CNFM_MAGIC.as_slice()) {
         return map;
     }
-    let version = u16::from_le_bytes([trailing[4], trailing[5]]);
+    let version = match read_u16_le(trailing, 4) {
+        Ok(version) => version,
+        Err(_) => return map,
+    };
     if version == 0 || version > CNFM_VERSION {
         return map; // Unknown version — don't attempt parsing.
     }
-    let count = u16::from_le_bytes([trailing[6], trailing[7]]) as usize;
+    let count = match read_u16_le(trailing, 6) {
+        Ok(count) => count as usize,
+        Err(_) => return map,
+    };
     let mut pos = 8usize;
     for _ in 0..count {
         if pos + 7 > trailing.len() {
             break;
         }
-        let crc = MixCrc::from_raw(u32::from_le_bytes([
-            trailing[pos],
-            trailing[pos + 1],
-            trailing[pos + 2],
-            trailing[pos + 3],
-        ]));
-        let type_hint = trailing[pos + 4];
-        let name_len = u16::from_le_bytes([trailing[pos + 5], trailing[pos + 6]]) as usize;
+        let crc = match read_u32_le(trailing, pos) {
+            Ok(value) => MixCrc::from_raw(value),
+            Err(_) => break,
+        };
+        let type_hint = match read_u8(trailing, pos + 4) {
+            Ok(value) => value,
+            Err(_) => break,
+        };
+        let name_len = match read_u16_le(trailing, pos + 5) {
+            Ok(value) => value as usize,
+            Err(_) => break,
+        };
         pos += 7;
         if pos + name_len > trailing.len() {
             break;

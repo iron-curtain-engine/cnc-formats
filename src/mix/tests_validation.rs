@@ -326,31 +326,6 @@ fn parse_large_count_within_cap_but_truncated_data() {
     assert!(matches!(err, Error::UnexpectedEof { .. }));
 }
 
-/// Extended format with both encrypted + SHA-1 flags (`0x0003`) is
-/// rejected on short input.
-///
-/// Why: encryption takes precedence over SHA-1 processing.  With
-/// `encrypted-mix` enabled the parser attempts decryption, which fails
-/// with `UnexpectedEof` on a 10-byte input.  Without the feature it
-/// returns `EncryptedArchive` immediately.
-#[test]
-fn parse_extended_encrypted_with_sha1_returns_error() {
-    let data = [
-        0x00u8, 0x00, // extended marker
-        0x03, 0x00, // flags = encrypted (0x02) | sha1 (0x01)
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ];
-    let result = MixArchive::parse(&data);
-    let err = result.unwrap_err();
-    #[cfg(feature = "encrypted-mix")]
-    assert!(
-        matches!(err, Error::UnexpectedEof { .. }),
-        "expected UnexpectedEof, got: {err}",
-    );
-    #[cfg(not(feature = "encrypted-mix"))]
-    assert_eq!(err, Error::EncryptedArchive);
-}
-
 /// `get_by_crc` returns the correct file content for a known CRC key.
 ///
 /// Why: tests the lower-level CRC lookup path that `get()` delegates to.
@@ -363,67 +338,6 @@ fn get_by_crc_returns_correct_data() {
     let key = crc("HELLO.TXT");
     let data = archive.get_by_crc(key).unwrap();
     assert_eq!(data, b"world");
-}
-
-// ── Encrypted MIX end-to-end ─────────────────────────────────────────
-
-/// End-to-end: parse a Blowfish-encrypted MIX archive.
-///
-/// Why: proves the full encrypted pipeline — key derivation, Blowfish
-/// decryption, header parsing, and file extraction — works end-to-end
-/// with a synthetic archive.
-///
-/// How: an all-zero 80-byte key_source derives a Blowfish key via RSA.
-/// A FileHeader (count=1, one SubBlock) is encrypted with that key.
-/// The complete encrypted MIX is assembled as:
-/// `[marker, flags=0x0002, key_source(80), encrypted_header, file_data]`.
-/// `MixArchive::parse` must extract the embedded file by name.
-#[cfg(feature = "encrypted-mix")]
-#[test]
-fn parse_encrypted_mix_end_to_end() {
-    use blowfish::cipher::generic_array::GenericArray;
-    use blowfish::cipher::{BlockEncrypt, KeyInit};
-    type BlowfishBE = blowfish::Blowfish;
-
-    // Derive the Blowfish key from an all-zero key_source.
-    let key_source = [0u8; 80];
-    let bf_key = crate::mix_crypt::derive_blowfish_key(&key_source).unwrap();
-
-    // Build plaintext header: count=1, data_size=5, one SubBlock.
-    // Layout: count(u16) + data_size(u32) + crc(u32) + offset(u32) + size(u32)
-    let file_data = b"HELLO";
-    let file_crc = crc("TEST.DAT");
-    let mut plaintext = Vec::new();
-    plaintext.extend_from_slice(&1u16.to_le_bytes());
-    plaintext.extend_from_slice(&(file_data.len() as u32).to_le_bytes());
-    plaintext.extend_from_slice(&file_crc.to_raw().to_le_bytes());
-    plaintext.extend_from_slice(&0u32.to_le_bytes());
-    plaintext.extend_from_slice(&(file_data.len() as u32).to_le_bytes());
-    // Pad to 8-byte block boundary: 18 → 24 bytes (3 blocks).
-    while plaintext.len() % 8 != 0 {
-        plaintext.push(0);
-    }
-
-    // Encrypt the header with the derived key.
-    let cipher = BlowfishBE::new_from_slice(&bf_key).unwrap();
-    let mut encrypted_header = plaintext.clone();
-    for chunk in encrypted_header.chunks_exact_mut(8) {
-        cipher.encrypt_block(GenericArray::from_mut_slice(chunk));
-    }
-
-    // Assemble the full encrypted MIX archive.
-    let mut archive_bytes = Vec::new();
-    archive_bytes.extend_from_slice(&0u16.to_le_bytes()); // extended marker
-    archive_bytes.extend_from_slice(&0x0002u16.to_le_bytes()); // flags: encrypted
-    archive_bytes.extend_from_slice(&key_source); // 80-byte key_source
-    archive_bytes.extend_from_slice(&encrypted_header); // encrypted header blocks
-    archive_bytes.extend_from_slice(file_data); // data section
-
-    // Parse and verify.
-    let archive = MixArchive::parse(&archive_bytes).unwrap();
-    assert_eq!(archive.file_count(), 1);
-    let extracted = archive.get("TEST.DAT").expect("file should exist");
-    assert_eq!(extracted, file_data);
 }
 
 // ── Module-specific adversarial tests ────────────────────────────────

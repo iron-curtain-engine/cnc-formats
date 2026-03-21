@@ -174,14 +174,46 @@ run_check "Format check" "cargo fmt --check"
 # -- 2. Clippy (all features) ----------------------------------------------
 run_check "Clippy (all features)" "cargo clippy --tests --all-features -- -D warnings"
 
-# -- 3. Clippy (no default features -- without blowfish) --------------------
-run_check "Clippy (no default features)" "cargo clippy --tests --no-default-features -- -D warnings"
+# -- 3. Compile check (no default features) --------------------------------
+# Catches missing #[cfg(feature)] gates. Full clippy is redundant here since
+# lint issues would also appear in the all-features run above.
+run_check "Compile check (no default features)" "cargo check --tests --no-default-features"
 
-# -- 4. Tests (all features) -----------------------------------------------
-run_check "Tests (all features)" "cargo test --all-features"
+# -- 4. Tests (parallel: all features + no default features) ---------------
+# Both test suites are independent — run them in parallel to halve wall time.
+echo "Running: Tests (all features + no default features) [parallel]"
 
-# -- 5. Tests (no default features) ----------------------------------------
-run_check "Tests (no default features)" "cargo test --no-default-features"
+start_time=$(date +%s)
+cargo test --all-features &
+pid_all=$!
+
+CARGO_TARGET_DIR=target/no-default cargo test --no-default-features &
+pid_nodef=$!
+
+test_failed=0
+if ! wait $pid_all; then
+    echo "FAIL: Tests (all features)"
+    test_failed=1
+else
+    echo "PASS: Tests (all features)"
+fi
+
+if ! wait $pid_nodef; then
+    echo "FAIL: Tests (no default features)"
+    test_failed=1
+else
+    echo "PASS: Tests (no default features)"
+fi
+
+end_time=$(date +%s)
+duration=$((end_time - start_time))
+echo "Tests completed (${duration}s)"
+echo
+
+if [[ $test_failed -ne 0 ]]; then
+    echo "ERROR: Fix the test failures above before pushing."
+    exit 1
+fi
 
 # -- 6. Documentation ------------------------------------------------------
 run_check "Documentation" "RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --document-private-items --all-features"
@@ -215,7 +247,7 @@ else
 fi
 
 # -- 9. MSRV check (rust-version from Cargo.toml) --------------------------
-MSRV="1.85"
+MSRV="1.86"
 echo "Checking MSRV ($MSRV)..."
 if command -v rustup &> /dev/null; then
     HAS_MSRV=false

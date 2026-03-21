@@ -41,9 +41,20 @@ use crate::read::{read_u16_le, read_u32_le, read_u8};
 
 mod decode;
 mod encode;
+mod info;
+mod playback;
+mod render;
 mod snd;
+mod snd_decode;
+mod snd_ima;
+mod stream;
+mod timing;
 pub use decode::{VqaAudio, VqaFrame};
 pub use encode::{encode_vqa, VqaAudioInput, VqaEncodeParams};
+pub use info::{VqaMediaInfo, VqaSeekIndex, VqaSeekPoint, VqaSeekSupport};
+pub use playback::{VqaAudioChunk, VqaDecodedFrame, VqaDecoder, VqaFrameBuffer};
+pub use stream::{VqaChunkOwned, VqaChunkRef, VqaStream};
+pub use timing::VqaFrameIndexEntry;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -146,11 +157,11 @@ impl VqaHeader {
 /// Each chunk has a 4-byte FourCC identifier and a payload.  The parser
 /// borrows the payload from the input slice to avoid copying.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VqaChunk<'a> {
+pub struct VqaChunk<'input> {
     /// Four-character code identifying the chunk type.
     pub fourcc: [u8; 4],
     /// Raw chunk payload (excluding the 8-byte chunk header).
-    pub data: &'a [u8],
+    pub data: &'input [u8],
 }
 
 // ─── Parsed File ─────────────────────────────────────────────────────────────
@@ -161,7 +172,7 @@ pub struct VqaChunk<'a> {
 /// decoding is not performed — callers iterate `chunks` to find VQFR/SND*
 /// data and decode on demand.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VqaFile<'a> {
+pub struct VqaFile<'input> {
     /// The VQHD header.
     pub header: VqaHeader,
     /// Raw frame-info entries from the FINF chunk.  Each `u32` is stored
@@ -171,10 +182,10 @@ pub struct VqaFile<'a> {
     /// FORM data.  `None` if no FINF chunk was found.
     pub frame_index: Option<Vec<u32>>,
     /// All chunks in file order (including VQHD and FINF if present).
-    pub chunks: Vec<VqaChunk<'a>>,
+    pub chunks: Vec<VqaChunk<'input>>,
 }
 
-impl<'a> VqaFile<'a> {
+impl<'input> VqaFile<'input> {
     /// Parses a VQA file from a raw byte slice.
     ///
     /// Validates the FORM/WVQA envelope, then iterates through the IFF
@@ -186,7 +197,7 @@ impl<'a> VqaFile<'a> {
     /// - [`Error::UnexpectedEof`] if the input is truncated at any point.
     /// - [`Error::InvalidMagic`] if the FORM/WVQA signature is missing.
     /// - [`Error::InvalidSize`] if frame count or chunk sizes exceed V38 caps.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
         // ── FORM envelope ────────────────────────────────────────────────
         if data.len() < FORM_ENVELOPE_SIZE {
             return Err(Error::UnexpectedEof {
@@ -432,3 +443,9 @@ fn parse_finf(data: &[u8], num_frames: u16) -> Result<Vec<u32>, Error> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_decode;
+#[cfg(test)]
+mod tests_playback;
+#[cfg(test)]
+mod tests_stream;

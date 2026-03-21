@@ -31,6 +31,9 @@
 use crate::error::Error;
 use crate::read::{read_u32_be, read_u32_le};
 
+mod stream;
+pub use stream::BigArchiveReader;
+
 /// Conservative upper bound for untrusted BIG entry counts.
 const MAX_BIG_ENTRIES: usize = 262_144;
 
@@ -59,17 +62,17 @@ pub struct BigEntry {
 
 /// Parsed BIG archive.
 #[derive(Debug)]
-pub struct BigArchive<'a> {
+pub struct BigArchive<'input> {
     version: BigVersion,
     entries: Vec<BigEntry>,
-    data: &'a [u8],
+    data: &'input [u8],
 }
 
-impl<'a> BigArchive<'a> {
+impl<'input> BigArchive<'input> {
     /// Parses a BIG archive from raw bytes.
     ///
     /// Supports the `BIGF` and `BIG4` variants used by SAGE-era games.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
         if data.len() < 16 {
             return Err(Error::UnexpectedEof {
                 needed: 16,
@@ -212,7 +215,8 @@ impl<'a> BigArchive<'a> {
     }
 
     /// Returns the file payload for the first case-insensitive name match.
-    pub fn get(&self, filename: &str) -> Option<&'a [u8]> {
+    #[inline]
+    pub fn get(&self, filename: &str) -> Option<&'input [u8]> {
         for entry in &self.entries {
             if entry.name.eq_ignore_ascii_case(filename) {
                 let start = entry.offset as usize;
@@ -227,7 +231,8 @@ impl<'a> BigArchive<'a> {
     ///
     /// This is the preferred accessor when iterating over `entries()` because
     /// duplicate filenames can exist in real BIG archives.
-    pub fn get_by_index(&self, index: usize) -> Option<&'a [u8]> {
+    #[inline]
+    pub fn get_by_index(&self, index: usize) -> Option<&'input [u8]> {
         let entry = self.entries.get(index)?;
         let start = entry.offset as usize;
         let end = start.saturating_add(entry.size as usize);

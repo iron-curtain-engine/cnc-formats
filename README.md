@@ -31,7 +31,7 @@ C&C titles — see the full format list below.
     <img src="https://img.shields.io/github/v/release/iron-curtain-engine/cnc-formats?label=📥%20Download%20Latest%20Release&style=for-the-badge&color=brightgreen" alt="Download Latest Release">
   </a>
   <br>
-  <sub>Pre-built binaries for Windows, macOS, and Linux — or <code>cargo install cnc-formats --version 0.1.0-alpha.1</code> while the crate is prerelease</sub>
+  <sub>Pre-built binaries for Windows, macOS, and Linux — or <code>cargo install cnc-formats --version 0.1.0-alpha.2</code> while the crate is prerelease</sub>
 </p>
 
 ## Status
@@ -50,13 +50,19 @@ C&C titles — see the full format list below.
 | `aud`       | `.aud` | Westwood IMA ADPCM audio                                                        |
 | `lcw`       | —      | LCW decompression (used by SHP, VQA, WSA)                                       |
 | `lut`       | `.lut` | Red Alert Chrono Vortex lookup tables                                           |
-| `tmp`       | `.tmp` | Terrain tile sets (TD + RA variants)                                            |
+| `tmp`       | `.tmp` | Terrain tile sets (TD + RA flat tiles; TS/RA2 isometric tiles)                  |
 | `vqa`       | `.vqa` | VQ video container (IFF chunk-based)                                            |
 | `vqp`       | `.vqp` | Packed VQA palette interpolation tables                                         |
 | `wsa`       | `.wsa` | LCW + XOR-delta animation                                                       |
 | `fnt`       | `.fnt` | Bitmap fonts (variable character count, 4bpp nibble-packed)                     |
 | `eng`       | `.eng` | Westwood language string tables (`.eng`, `.ger`, `.fre`)                        |
 | `dip`       | `.dip` | Special effects palette data                                                    |
+| `cps`       | `.cps` | Compressed full-screen images (TD/RA1/Dune II title screens)                   |
+| `csf`       | `.csf` | Compiled string tables (Tiberian Sun, Red Alert 2, Generals)                   |
+| `hva`       | `.hva` | Hierarchical voxel animation transforms (TS/RA2)                               |
+| `shp_ts`    | `.shp` | TS/RA2 sprite frames with per-frame crop offsets (scanline RLE)                |
+| `vxl`       | `.vxl` | Voxel models for TS/RA2 3-D units                                              |
+| `w3d`       | `.w3d` | Westwood 3-D chunk-based mesh format (Generals/SAGE engine)                    |
 | `ini`       | `.ini` | Classic C&C rules file parser                                                   |
 | `mix_crypt` | —      | Blowfish key derivation for encrypted `.mix` (requires `encrypted-mix` feature) |
 | `sniff`     | —      | Content-based format detection (`sniff::sniff_format`)                          |
@@ -84,10 +90,12 @@ structure, then optionally run helper conversion or rendering APIs.
 | ---- | ------------ |
 | Error handling | `cnc_formats::Error` re-exported at the crate root |
 | Format detection | `sniff::sniff_format(&[u8]) -> Option<&'static str>` |
-| MIX / BIG archives | `mix::crc`, `mix::builtin_name_map`, `mix::MixArchive::parse`, `get`, `get_by_crc`, `entries`, `file_count`, `big::BigArchive::parse`, `get`, `get_by_index` |
+| MIX / BIG archives | `mix::crc`, `mix::builtin_name_map`, `mix::MixArchive::parse`, `get`, `get_by_crc`, `entries`, `file_count`, `mix::MixOverlayIndex`, `big::BigArchive::parse`, `get`, `get_by_index` |
+| Streaming archives / media | `mix::MixArchiveReader::open`, `read`, `copy_by_index`, `open_entry`, `MixEntryReader`, `big::BigArchiveReader::open`, `read`, `copy_by_index`, `vqa::VqaStream::open`, `next_chunk`, `next_chunk_owned`, `vqa::VqaDecoder::open`, `media_info`, `seek_index`, `frame_duration`, `frame_timestamp`, `frame_index_entries`, `next_frame`, `next_frame_into`, `read_audio_samples`, `next_audio_chunk`, `next_audio_for_frame_interval`, `decoded_audio_sample_frames`, `seek_to_frame`, `seek_to_time`, `aud::AudStream::open`, `media_info`, `next_chunk`, `read_samples`, `decoded_sample_frames`, `remaining_sample_frames`, `open_seekable`, `rewind` |
 | AUD / LUT data | `aud::AudFile::parse`, `aud::decode_adpcm`, `aud::encode_adpcm`, `aud::build_aud`, `lut::LutFile::parse` |
 | LCW codec | `lcw::decompress`, `lcw::compress` |
-| SHP / WSA / TMP | `shp::ShpFile::parse`, `shp::encode_frames`, `wsa::WsaFile::parse`, `wsa::encode_frames`, `tmp::TdTmpFile::parse`, `tmp::RaTmpFile::parse`, `tmp::encode_td_tmp` |
+| SHP / WSA / TMP | `shp::ShpFile::parse`, `shp::encode_frames`, `wsa::WsaFile::parse`, `wsa::encode_frames`, `tmp::TdTmpFile::parse`, `tmp::RaTmpFile::parse`, `tmp::TsTmpFile::parse`, `tmp::encode_td_tmp` |
+| CPS / CSF / HVA / SHP-TS / VXL / W3D | `cps::CpsFile::parse`, `csf::CsfFile::parse`, `csf::CsfString`, `hva::HvaFile::parse`, `shp_ts::ShpTsFile::parse`, `vxl::VxlFile::parse`, `w3d::W3dFile::parse` |
 | PAL / FNT / ENG / DIP / INI | `pal::Palette::parse`, `fnt::FntFile::parse`, `eng::EngFile::parse`, `dip::DipFile::parse`, `ini::IniFile::parse` |
 | VQA / VQP | `vqa::VqaFile::parse`, `VqaFile::decode_frames`, `VqaFile::extract_audio`, `vqp::VqpFile::parse`, `VqpTable::get` |
 
@@ -95,27 +103,28 @@ structure, then optionally run helper conversion or rendering APIs.
 
 | Feature | Primary APIs |
 | ------- | ------------ |
-| `convert` | `convert::shp_frames_to_png`, `png_to_shp`, `aud_to_wav`, `wav_to_aud`, `vqa_to_avi`, `avi_to_vqa`, `decode_avi`, `encode_avi` |
+| `convert` | `convert::shp_frames_to_png`, `png_to_shp`, `aud_to_wav`, `wav_to_aud`, `vqa_to_avi`, `vqa_to_mkv`, `avi_to_vqa`, `decode_avi`, `encode_avi` |
 | `miniyaml` | `miniyaml::MiniYamlDoc::parse`, `MiniYamlDoc::parse_str`, `miniyaml::to_yaml` |
 | `midi` | `mid::MidFile::parse`, `mid::write`, `mid::load_soundfont`, `mid::render_to_pcm`, `mid::render_to_wav` |
 | `adl` | `adl::AdlFile::parse`, `AdlFile::total_register_writes`, `AdlFile::estimated_duration_secs` |
 | `xmi` | `xmi::XmiFile::parse`, `XmiFile::sequence_count`, `xmi::to_mid` |
 | `transcribe` | `transcribe::TranscribeConfig`, `pcm_to_notes`, `pcm_to_mid`, `notes_to_mid`, `wav_to_mid`, `wav_to_xmi`, `mid_to_xmi` |
-| `meg` | `meg::MegArchive::parse`, `get`, `get_by_index`, `entries`, `file_count` |
+| `meg` | `meg::MegArchive::parse`, `get`, `get_by_index`, `entries`, `file_count`, `meg::MegArchiveReader::open`, `read`, `copy_by_index` |
 
 ### CLI tool
 
-The `cncf` binary provides seven subcommands:
+The `cncf` binary provides eight subcommands:
 
 ```text
-cncf validate <file>                                  # Parse and report structural validity
-cncf inspect  <file>                                  # Dump metadata (entries, dimensions, etc.)
-cncf list     <file>                                  # List archive entries
-cncf extract  <file>                                  # Extract archive entries to individual files
-cncf convert  <file> --format miniyaml --to yaml      # .yaml is ambiguous — explicit --format
-cncf convert  rules.miniyaml --to yaml                # .miniyaml auto-detects
-cncf check    <file>                                  # Deep structural integrity verification
+cncf validate    <file>                               # Parse and report structural validity
+cncf inspect     <file>                               # Dump metadata (entries, dimensions, etc.)
+cncf list        <file>                               # List archive entries
+cncf extract     <file>                               # Extract archive entries to individual files
+cncf convert     <file> --format miniyaml --to yaml   # .yaml is ambiguous — explicit --format
+cncf convert     rules.miniyaml --to yaml             # .miniyaml auto-detects
+cncf check       <file>                               # Deep structural integrity verification
 cncf fingerprint <file>                               # SHA-256 of raw file bytes
+cncf identify    <file>                               # Probe content and report the likely format
 ```
 
 `validate` and `inspect` work on all formats.  `list` and `extract` operate
@@ -127,6 +136,16 @@ for `.yaml` files that are MiniYAML).
 `list` displays a tabular inventory of archive entries (CRC, size, and
 optionally resolved filenames via `--names <file>` or the built-in unique-CRC
 resolver for MIX archives). BIG archives display their stored names directly.
+
+`list`, `extract`, and `fingerprint` stream file data from disk instead of
+reading entire archives into RAM first. This matters most for large MIX, BIG,
+MEG/PGM, and VQA workflows.
+
+For MIX archives, `list` and `extract` also accept `--mix-access stream|eager`.
+`stream` is the default and keeps entry payloads on disk until needed.
+`eager` reads the full archive into RAM before the command walks entries.
+This crate exposes both policies without owning engine/runtime configuration:
+downstream tools can wire the choice to settings or console variables.
 
 `extract` writes each archive entry to a separate file.  Use `--output <dir>`
 to set the destination, `--names <file>` to resolve MIX filenames, and
@@ -150,6 +169,7 @@ Supported conversions (with `convert` feature):
 - PAL ↔ PNG
 - FNT + PAL → PNG
 - VQA ↔ AVI
+- VQA → MKV (Matroska container, preserving original video and audio streams)
 
 Supported conversions (with `miniyaml` feature):
 - MiniYAML → YAML
@@ -170,8 +190,9 @@ see the `ra-formats` crate in the [Iron Curtain engine](https://github.com/iron-
   strings for transformed keys and values
 - **Security hardened** — bounds-checked reads, decompression ratio caps,
   output size limits, fuzz targets for every module
-- **Slice-based API** — all parsers take `&[u8]` or `&str`; callers provide
-  the bytes directly
+- **Dual access model** — whole-buffer parsers still take `&[u8]` or `&str`,
+  and large containers plus classic media formats expose reader-based
+  incremental decode APIs
 
 ## Usage
 
@@ -200,7 +221,62 @@ if let Some(frame) = shp_file.frames.first() {
     let pixel_count = shp_file.header.width as usize * shp_file.header.height as usize;
     let pixels = frame.pixels(pixel_count)?; // LCW-decompressed pixel data
 }
+
+// Stream a MIX archive without loading the whole file into memory.
+let file = std::fs::File::open("conquer.mix")?;
+let mut stream = mix::MixArchiveReader::open(file)?;
+if let Some(entry_data) = stream.read("palette.pal")? {
+    let palette = pal::Palette::parse(&entry_data)?;
+    assert_eq!(palette.colors.len(), 256);
+}
+
+if let Some(mut entry_reader) = stream.open_entry("rules.ini")? {
+    let mut ini_bytes = Vec::new();
+    std::io::Read::read_to_end(&mut entry_reader, &mut ini_bytes)?;
+    let ini = cnc_formats::ini::IniFile::parse(&ini_bytes)?;
+    assert!(ini.section("Basic").is_some());
+}
+
+// Stream AUD samples without holding the whole file or PCM output in RAM.
+let file = std::fs::File::open("speech.aud")?;
+let mut audio = cnc_formats::aud::AudStream::open_seekable(file)?;
+let info = audio.media_info();
+assert_eq!(info.channels, 1);
+
+let mut pcm = [0i16; 2048];
+let read = audio.read_samples(&mut pcm)?;
+assert!(read <= pcm.len());
+assert!(audio.decoded_sample_frames() > 0);
+
+// Decode VQA incrementally with bounded preroll.
+let file = std::fs::File::open("intro.vqa")?;
+let mut video = cnc_formats::vqa::VqaDecoder::open(file)?;
+let info = video.media_info();
+assert_eq!(info.width, 320);
+assert_eq!(info.height, 200);
+assert_eq!(video.frame_timestamp(0), Some(std::time::Duration::ZERO));
+
+let mut frame = cnc_formats::vqa::VqaFrameBuffer::from_media_info(&info);
+if let Some(index) = video.next_frame_into(&mut frame)? {
+    assert_eq!(index, 0);
+    assert_eq!(frame.pixels().len(), 320 * 200);
+}
+
+let mut audio_buf = [0i16; 2048];
+let samples = video.read_audio_samples(&mut audio_buf)?;
+assert!(samples <= audio_buf.len());
+video.seek_to_time(std::time::Duration::from_millis(500))?;
+
+// Stream container chunks through the reusable internal scratch buffer.
+let mut chunks = cnc_formats::vqa::VqaStream::open(std::fs::File::open("intro.vqa")?)?;
+if let Some(chunk) = chunks.next_chunk()? {
+    assert_eq!(&chunk.fourcc, b"VQHD");
+}
 ```
+
+When you mount several MIX archives in priority order, `mix::MixOverlayIndex`
+can cache the winning entry source per CRC once and avoid rescanning every
+archive on every lookup.
 
 Feature-gated examples:
 
@@ -220,6 +296,36 @@ Architecture and format specifications are maintained in the
 Key references:
 - [Format specifications](https://iron-curtain-engine.github.io/iron-curtain-design-docs/05-FORMATS.html)
 - [D076 — Standalone crate extraction](https://iron-curtain-engine.github.io/iron-curtain-design-docs/decisions/09a/D076-standalone-crates.html)
+
+## Performance Monitoring
+
+The repo now includes generated-fixture performance coverage for both whole-buffer
+parsers and the incremental streaming/session APIs:
+
+- `cargo bench --locked --bench criterion_formats`
+- `cargo bench --locked --bench criterion_streaming`
+- `cargo bench --locked --bench callgrind_hotpaths`
+- `cargo test --locked --test perf_alloc`
+
+`criterion_formats` tracks parse and lookup throughput across the archive,
+media, text, and music formats. `criterion_streaming` exercises reader-based
+archive access plus incremental AUD/VQA decode paths. `callgrind_hotpaths`
+provides a more stable instruction-count signal for hot functions where
+wall-clock timings are too noisy.
+
+The allocation regression test is intentionally narrower than the wall-clock
+benchmarks. It currently asserts zero allocations after setup for:
+
+- `mix::crc`
+- `MixArchive::get_by_crc`
+- `AudStream::read_samples`
+- `VqaStream::next_chunk` after scratch warmup
+- queued `VqaDecoder::read_audio_samples`
+
+`VqaDecoder::next_frame_into` is still benchmarked, but not under a zero-allocation
+assertion, because valid VQA frame chunks can still require temporary decode
+buffers for compressed sub-chunks even though the stream boundary itself now
+reuses chunk storage.
 
 ## License
 

@@ -33,18 +33,19 @@ const MAX_TABLE_COUNT: usize = 4096;
 
 /// One packed VQP interpolation table.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VqpTable<'a> {
+pub struct VqpTable<'input> {
     /// Zero-based table index.
     pub index: usize,
     /// Packed lower-triangle bytes.
-    pub packed: &'a [u8],
+    pub packed: &'input [u8],
 }
 
-impl<'a> VqpTable<'a> {
+impl VqpTable<'_> {
     /// Returns the palette index for the `(left, right)` pair.
     ///
     /// The on-disk table stores only the lower triangle. This accessor mirrors
     /// `(left, right)` into that stored half and returns the corresponding byte.
+    #[inline]
     pub fn get(&self, left: u8, right: u8) -> u8 {
         let (row, col) = if left >= right {
             (left as usize, right as usize)
@@ -59,14 +60,14 @@ impl<'a> VqpTable<'a> {
 
 /// Parsed VQP file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VqpFile<'a> {
+pub struct VqpFile<'input> {
     /// Number of interpolation tables stored in the file.
     pub num_tables: u32,
     /// Packed interpolation tables.
-    pub tables: Vec<VqpTable<'a>>,
+    pub tables: Vec<VqpTable<'input>>,
 }
 
-impl<'a> VqpFile<'a> {
+impl<'input> VqpFile<'input> {
     /// Parses a VQP file from raw bytes.
     ///
     /// # Errors
@@ -74,7 +75,7 @@ impl<'a> VqpFile<'a> {
     /// - [`Error::UnexpectedEof`] if the input is shorter than the header.
     /// - [`Error::InvalidSize`] if the table count exceeds limits or if the
     ///   file size does not match the packed-table layout exactly.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
         if data.len() < 4 {
             return Err(Error::UnexpectedEof {
                 needed: 4,

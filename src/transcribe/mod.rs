@@ -54,6 +54,7 @@ pub mod pitch;
 mod quantize;
 
 use crate::error::Error;
+use crate::read::read_u32_be;
 use onset::DetectedNote;
 
 // Re-export key types at module level.
@@ -296,7 +297,8 @@ pub fn mid_to_xmi(mid_bytes: &[u8]) -> Result<Vec<u8>, Error> {
         let chunk_id = mid_bytes.get(pos..pos.saturating_add(4));
         let chunk_len_bytes = mid_bytes.get(pos.saturating_add(4)..pos.saturating_add(8));
         let chunk_len = chunk_len_bytes
-            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+            .and_then(|_| read_u32_be(mid_bytes, pos.saturating_add(4)).ok())
+            .map(|value| value as usize)
             .unwrap_or(0);
 
         if chunk_id == Some(b"MTrk".as_slice()) {

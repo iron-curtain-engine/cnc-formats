@@ -8,7 +8,8 @@
 //! Output goes to stdout so it can be piped to other tools.
 
 use super::{
-    build_mix_name_map, load_name_map, read_file, resolve_format, supported_archive_list, Format,
+    build_mix_name_map_archive, build_mix_name_map_reader, load_name_map, open_file, read_file,
+    resolve_format, supported_archive_list, Format, MixAccessMode,
 };
 use std::collections::HashMap;
 
@@ -17,7 +18,12 @@ use cnc_formats::mix::MixCrc;
 // ── list ─────────────────────────────────────────────────────────────────────
 
 /// Parse an archive and print a per-entry inventory.
-pub(crate) fn cmd_list(path: &str, explicit: Option<Format>, names: Option<&str>) -> i32 {
+pub(crate) fn cmd_list(
+    path: &str,
+    explicit: Option<Format>,
+    mix_access: MixAccessMode,
+    names: Option<&str>,
+) -> i32 {
     let fmt = resolve_format(path, explicit);
 
     if !is_archive_format(&fmt) {
@@ -29,10 +35,51 @@ pub(crate) fn cmd_list(path: &str, explicit: Option<Format>, names: Option<&str>
         return 1;
     }
 
-    let data = read_file(path);
-
     match fmt {
-        Format::Mix => {
+        Format::Mix => list_mix_with_policy(path, mix_access, names),
+        Format::Big => {
+            if mix_access != MixAccessMode::Stream {
+                eprintln!("Warning: --mix-access is ignored for BIG archives.");
+            }
+            if names.is_some() {
+                eprintln!(
+                    "Warning: --names is ignored for BIG archives; filenames are stored in the archive."
+                );
+            }
+            let file = open_file(path);
+            list_big(file)
+        }
+        #[cfg(feature = "meg")]
+        Format::Meg => {
+            if mix_access != MixAccessMode::Stream {
+                eprintln!("Warning: --mix-access is ignored for MEG/PGM archives.");
+            }
+            if names.is_some() {
+                eprintln!(
+                    "Warning: --names is ignored for MEG/PGM archives; filenames are stored in the archive."
+                );
+            }
+            let file = open_file(path);
+            list_meg(file)
+        }
+        _ => {
+            eprintln!("Error: unsupported archive format for `list`.");
+            1
+        }
+    }
+}
+
+fn list_mix_with_policy(path: &str, mix_access: MixAccessMode, names: Option<&str>) -> i32 {
+    match mix_access {
+        MixAccessMode::Stream => {
+            let file = open_file(path);
+            let mut archive = match cnc_formats::mix::MixArchiveReader::open(file) {
+                Ok(archive) => archive,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
             let name_map = match names {
                 Some(path) => match load_name_map(path) {
                     Ok(m) => m,
@@ -41,30 +88,36 @@ pub(crate) fn cmd_list(path: &str, explicit: Option<Format>, names: Option<&str>
                         return 1;
                     }
                 },
-                None => build_mix_name_map(&data),
+                None => match build_mix_name_map_reader(&mut archive) {
+                    Ok(map) => map,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        return 1;
+                    }
+                },
             };
-            list_mix(&data, &name_map)
+            list_mix_entries(archive.entries(), &name_map)
         }
-        Format::Big => {
-            if names.is_some() {
-                eprintln!(
-                    "Warning: --names is ignored for BIG archives; filenames are stored in the archive."
-                );
-            }
-            list_big(&data)
-        }
-        #[cfg(feature = "meg")]
-        Format::Meg => {
-            if names.is_some() {
-                eprintln!(
-                    "Warning: --names is ignored for MEG/PGM archives; filenames are stored in the archive."
-                );
-            }
-            list_meg(&data)
-        }
-        _ => {
-            eprintln!("Error: unsupported archive format for `list`.");
-            1
+        MixAccessMode::Eager => {
+            let data = read_file(path);
+            let archive = match cnc_formats::mix::MixArchive::parse(&data) {
+                Ok(archive) => archive,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
+            let name_map = match names {
+                Some(path) => match load_name_map(path) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("Error loading names file: {e}");
+                        return 1;
+                    }
+                },
+                None => build_mix_name_map_archive(&archive),
+            };
+            list_mix_entries(archive.entries(), &name_map)
         }
     }
 }
@@ -83,20 +136,14 @@ fn is_archive_format(fmt: &Format) -> bool {
 
 // ── MIX listing ──────────────────────────────────────────────────────────────
 
-/// Parse a MIX archive and print a per-entry table to stdout.
+/// Print a MIX entry table to stdout.
 ///
 /// With no name map: columns are CRC and Size.
 /// With a name map: columns are CRC, Size, and Name.
-fn list_mix(data: &[u8], name_map: &HashMap<MixCrc, String>) -> i32 {
-    let archive = match cnc_formats::mix::MixArchive::parse(data) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            return 1;
-        }
-    };
-
-    let entries = archive.entries();
+fn list_mix_entries(
+    entries: &[cnc_formats::mix::MixEntry],
+    name_map: &HashMap<MixCrc, String>,
+) -> i32 {
     let has_names = !name_map.is_empty();
 
     // ── Header ───────────────────────────────────────────────────────────
@@ -136,8 +183,8 @@ fn list_mix(data: &[u8], name_map: &HashMap<MixCrc, String>) -> i32 {
 // ── BIG listing ──────────────────────────────────────────────────────────────
 
 /// Parse a BIG archive and print a per-entry table to stdout.
-fn list_big(data: &[u8]) -> i32 {
-    let archive = match cnc_formats::big::BigArchive::parse(data) {
+fn list_big<R: std::io::Read + std::io::Seek>(file: R) -> i32 {
+    let archive = match cnc_formats::big::BigArchiveReader::open(file) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -166,8 +213,8 @@ fn list_big(data: &[u8]) -> i32 {
 ///
 /// MEG archives store filenames directly, so no `--names` file is needed.
 #[cfg(feature = "meg")]
-fn list_meg(data: &[u8]) -> i32 {
-    let archive = match cnc_formats::meg::MegArchive::parse(data) {
+fn list_meg<R: std::io::Read + std::io::Seek>(file: R) -> i32 {
+    let archive = match cnc_formats::meg::MegArchiveReader::open(file) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("Error: {e}");

@@ -47,6 +47,12 @@ pub fn sniff_format(data: &[u8]) -> Option<&'static str> {
     if is_meg(data) {
         return Some("meg");
     }
+    if is_vxl(data) {
+        return Some("vxl");
+    }
+    if is_csf(data) {
+        return Some("csf");
+    }
     if is_mix(data) {
         return Some("mix");
     }
@@ -64,6 +70,9 @@ pub fn sniff_format(data: &[u8]) -> Option<&'static str> {
     if is_lut(data) {
         return Some("lut");
     }
+    if is_shp_ts(data) {
+        return Some("shp_ts");
+    }
 
     // ── Exact-size format ───────────────────────────────────────────
     if is_pal(data) {
@@ -77,6 +86,9 @@ pub fn sniff_format(data: &[u8]) -> Option<&'static str> {
     }
 
     // ── Heuristic formats (try parser, least reliable) ──────────────
+    if is_cps(data) {
+        return Some("cps");
+    }
     if is_shp(data) {
         return Some("shp");
     }
@@ -86,8 +98,73 @@ pub fn sniff_format(data: &[u8]) -> Option<&'static str> {
     if is_aud(data) {
         return Some("aud");
     }
+    if is_w3d(data) {
+        return Some("w3d");
+    }
+    if is_hva(data) {
+        return Some("hva");
+    }
 
     None
+}
+
+/// VXL: strong 16-byte magic "Voxel Animation\0".
+fn is_vxl(data: &[u8]) -> bool {
+    data.len() >= 16 && data.get(..16) == Some(b"Voxel Animation\0")
+}
+
+/// CSF: strong 4-byte magic " FSC" (space + F + S + C).
+fn is_csf(data: &[u8]) -> bool {
+    data.len() >= 4 && data.get(..4) == Some(b" FSC")
+}
+
+/// TS/RA2 SHP: first u16 is 0, followed by plausible dimensions and frame count.
+/// Placed after FNT/DIP/LUT (structural) but before heuristic formats.
+fn is_shp_ts(data: &[u8]) -> bool {
+    crate::shp_ts::ShpTsFile::parse(data).is_ok()
+}
+
+/// CPS: 10-byte header with plausible compression and buffer size.
+/// CPS files are small (typically 64 KB range for 320×200 images), so
+/// reject files that are implausibly large or too small for the header.
+fn is_cps(data: &[u8]) -> bool {
+    // Must have at least the 10-byte header.
+    if data.len() < 10 {
+        return false;
+    }
+    // Plausibility: compression must be 0 (raw) or 4 (LCW).
+    let comp = match crate::read::read_u16_le(data, 6) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    if comp != 0 && comp != 4 {
+        return false;
+    }
+    crate::cps::CpsFile::parse(data).is_ok()
+}
+
+/// W3D: recursive chunk-based 3D mesh format. Requires at least one valid
+/// chunk (8-byte header minimum) and successful parse with at least one chunk.
+fn is_w3d(data: &[u8]) -> bool {
+    if data.len() < 8 {
+        return false;
+    }
+    match crate::w3d::W3dFile::parse(data) {
+        Ok(w3d) => !w3d.chunks.is_empty(),
+        Err(_) => false,
+    }
+}
+
+/// HVA: hierarchical voxel animation. No magic bytes; requires at least the
+/// 24-byte header and successful parse with at least one section.
+fn is_hva(data: &[u8]) -> bool {
+    if data.len() < 24 {
+        return false;
+    }
+    match crate::hva::HvaFile::parse(data) {
+        Ok(hva) => hva.header.num_sections > 0 && hva.header.num_frames > 0,
+        Err(_) => false,
+    }
 }
 
 /// Segmented DIP installer data: section table followed by control streams.
@@ -401,6 +478,22 @@ mod tests {
     #[test]
     fn sniff_short() {
         assert_eq!(sniff_format(&[0x42]), None);
+    }
+
+    /// VXL files are detected by "Voxel Animation\0" magic.
+    #[test]
+    fn sniff_vxl() {
+        let mut data = vec![0u8; 1024];
+        data[..16].copy_from_slice(b"Voxel Animation\0");
+        assert_eq!(sniff_format(&data), Some("vxl"));
+    }
+
+    /// CSF files are detected by " FSC" magic.
+    #[test]
+    fn sniff_csf() {
+        let mut data = vec![0u8; 64];
+        data[..4].copy_from_slice(b" FSC");
+        assert_eq!(sniff_format(&data), Some("csf"));
     }
 
     /// SHP detection uses structural heuristics.

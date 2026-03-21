@@ -92,6 +92,13 @@ Per D076, `cnc-formats` must parse **all** C&C binary formats:
 | `vqa`  | `.vqa` | Implemented | IFF chunk-based VQ video container                    |
 | `wsa`  | `.wsa` | Implemented | LCW + XOR-delta animation                             |
 | `fnt`  | `.fnt` | Implemented | Bitmap fonts (variable character count, 4bpp)         |
+| `cps`  | `.cps` | Implemented | Compressed Screen Picture (TD/RA1/Dune II title art)  |
+| `shp_ts` | `.shp` | Implemented | TS/RA2 SHP sprites (scanline RLE, distinct from TD)   |
+| `vxl`  | `.vxl` | Implemented | TS/RA2 voxel models (limb headers + body + tailers)   |
+| `hva`  | `.hva` | Implemented | TS/RA2 hierarchical voxel animation (3×4 transforms)  |
+| `w3d`  | `.w3d` | Implemented | Generals/SAGE 3D meshes (recursive IFF-like chunks)   |
+| `tmp` (TS) | `.tmp` | Implemented | TS/RA2 isometric terrain tiles (diamond + extras + Z) |
+| `csf`  | `.csf` | Implemented | TS/RA2/Generals string tables (category + label)      |
 
 | `ini`  | `.ini` | Implemented | Classic C&C rules format (always enabled)              |
 | `miniyaml` | MiniYAML | Implemented | OpenRA rules format (behind `miniyaml` feature flag)  |
@@ -118,7 +125,7 @@ govern this crate are:
 
 - **Invariant 8 — Full resource compatibility:** the engine must load `.mix`,
   `.shp`, `.pal`, `.aud`, and `.oramap` formats. `cnc-formats` is the
-  permissive-licensed half of this responsibility; `ra-formats` (GPL v3)
+  permissive-licensed half of this responsibility; `ic-cnc-content` (GPL v3)
   covers the EA-derived half.
 - **Invariant 10 — Platform-agnostic design:** parsers must not assume a
   specific OS or threading model. Prefer `&[u8]` input as the primary parsing
@@ -141,7 +148,7 @@ be implemented from:
 - Binary analysis of game files
 - Clean-room reverse engineering
 
-EA-derived parsing logic belongs in `ra-formats` (GPL v3) in the main engine repo.
+EA-derived parsing logic belongs in `ic-cnc-content` (GPL v3) in the main engine repo.
 
 **Blowfish decryption exception:** Encrypted RA/TS `.mix` files embed an
 80-byte `key_source` block that is decrypted via RSA-like modular
@@ -597,6 +604,19 @@ indices, hashes) would benefit from newtype wrapping. Apply newtypes where
 misuse could cause silent data corruption or security issues — not for every
 integer.
 
+### Lifetime Naming
+
+- Lifetime parameter names must be meaningful: name the lifetime after the
+  item whose lifetime it represents (for example `'input` for an input
+  slice, `'buf` for a buffer, `'frame` for frame data, `'palette` for a
+  borrowed palette). Avoid vague single-letter names like `'a` in public
+  APIs; single-letter lifetimes may be acceptable in very small local
+  scopes or short-lived closures.
+- Prefer descriptive lifetime names in structs and function signatures so
+  reviewers and automated tools can immediately identify what is being
+  borrowed and why. This improves readability and reduces confusion when
+  multiple lifetimes are present.
+
 ### Parser Design Philosophy
 
 - **Parsers are pure functions** of their input (`&[u8]`). No hidden state,
@@ -613,7 +633,8 @@ integer.
 - The crate uses `std`. Use standard library types (`Vec`, `String`, `HashMap`)
   as appropriate.
 - The `&[u8]` parsing API remains the primary interface (callers provide bytes).
-  Streaming APIs are outside the current public contract for this crate.
+  Large container formats should also expose reader-based streaming APIs when
+  they materially reduce whole-file memory use.
 
 ### Heap Allocation Policy
 
@@ -673,6 +694,12 @@ allocation to reduce allocator overhead, GC pauses, and memory fragmentation.
 | `fnt`       | 1 (glyph Vec)           | 0                    | Glyph data borrows input    |
 | `ini`       | 3 (HashMap + 2 Vecs)    | 0                    | String allocs per entry     |
 | `miniyaml`  | N (node tree)           | 0                    | String allocs per node      |
+| `cps`       | 1 (output Vec)          | 0                    | LCW decompress or raw copy  |
+| `shp_ts`    | 2 (offset + frame Vecs) | 1 per `pixels()`    | Frame data borrows input    |
+| `vxl`       | 3 (headers + tailers)   | 0                    | Body data borrows input     |
+| `hva`       | 2 (names + transforms)  | 0                    | Float data parsed into Vec  |
+| `w3d`       | N (chunk tree)          | 0                    | Leaf data borrows input     |
+| `csf`       | N (category + strings)  | 0                    | String data parsed into Vec |
 
 ### Implementation Comments (What / Why / How)
 
@@ -898,8 +925,8 @@ MSRV toolchain is auto-installed via `rustup` if missing.
 - Text format modules (`.ini`, MiniYAML) are implemented
 - CLI tool (`cncf` binary) is implemented with `validate`, `inspect`,
   `convert`, `list`, `extract`, `check`, and `fingerprint` subcommands
-- Goal #8 (`std::io::Read` streaming API) is tracked separately from the
-  current slice-based crate surface
+- Goal #8 (`std::io::Read` streaming API) is implemented additively alongside
+  the current slice-based crate surface
 
 ## Execution Overlay Mapping
 

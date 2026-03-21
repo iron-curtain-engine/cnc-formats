@@ -3,6 +3,8 @@
 
 //! `inspect` subcommand — parse a file and print human-readable metadata.
 
+mod extra;
+
 use super::{print_format_hint, read_file, resolve_format, Format};
 
 // ── inspect ──────────────────────────────────────────────────────────────────
@@ -39,18 +41,25 @@ fn inspect_data(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> {
         Format::Fnt => inspect_fnt(data),
         Format::Eng => inspect_eng(data),
         Format::Ini => inspect_ini(data),
+        Format::Vxl => extra::inspect_vxl(data),
+        Format::Hva => extra::inspect_hva(data),
+        Format::ShpTs => extra::inspect_shp_ts(data),
+        Format::Csf => extra::inspect_csf(data),
+        Format::Cps => extra::inspect_cps(data),
+        Format::W3d => extra::inspect_w3d(data),
+        Format::TmpTs => extra::inspect_ts_tmp(data),
         #[cfg(feature = "miniyaml")]
-        Format::Miniyaml => inspect_miniyaml(data),
+        Format::Miniyaml => extra::inspect_miniyaml(data),
         #[cfg(feature = "convert")]
-        Format::Avi => inspect_avi(data),
+        Format::Avi => extra::inspect_avi(data),
         #[cfg(feature = "midi")]
-        Format::Mid => inspect_mid(data),
+        Format::Mid => extra::inspect_mid(data),
         #[cfg(feature = "adl")]
-        Format::Adl => inspect_adl(data),
+        Format::Adl => extra::inspect_adl(data),
         #[cfg(feature = "xmi")]
-        Format::Xmi => inspect_xmi(data),
+        Format::Xmi => extra::inspect_xmi(data),
         #[cfg(feature = "meg")]
-        Format::Meg => inspect_meg(data),
+        Format::Meg => extra::inspect_meg(data),
     }
 }
 
@@ -224,8 +233,12 @@ fn inspect_dip(data: &[u8]) -> Result<(), cnc_formats::Error> {
                 );
             }
             if segmented.trailer.len() == 2 {
-                let trailer = u16::from_le_bytes([segmented.trailer[0], segmented.trailer[1]]);
-                println!("  Trailer:     0x{trailer:04X}");
+                if let Some(bytes) = segmented.trailer.get(..2) {
+                    let mut trailer_bytes = [0u8; 2];
+                    trailer_bytes.copy_from_slice(bytes);
+                    let trailer = u16::from_le_bytes(trailer_bytes);
+                    println!("  Trailer:     0x{trailer:04X}");
+                }
             }
         }
     }
@@ -376,145 +389,6 @@ fn inspect_ini(data: &[u8]) -> Result<(), cnc_formats::Error> {
     println!("  Sections: {}", ini.section_count());
     for section in ini.sections() {
         println!("  [{}] ({} keys)", section.name(), section.len());
-    }
-    Ok(())
-}
-
-#[cfg(feature = "convert")]
-fn inspect_avi(data: &[u8]) -> Result<(), cnc_formats::Error> {
-    let avi = cnc_formats::convert::decode_avi(data)?;
-    println!("AVI video (uncompressed)");
-    println!("  Dimensions: {}×{}", avi.width, avi.height);
-    println!("  Frames:     {}", avi.frames.len());
-    println!("  FPS:        {}", avi.fps);
-    if !avi.audio.is_empty() {
-        println!(
-            "  Audio:      {} samples, {}Hz, {} ch",
-            avi.audio.len(),
-            avi.sample_rate,
-            avi.channels
-        );
-    } else {
-        println!("  Audio:      none");
-    }
-    Ok(())
-}
-
-#[cfg(feature = "miniyaml")]
-fn inspect_miniyaml(data: &[u8]) -> Result<(), cnc_formats::Error> {
-    let doc = cnc_formats::miniyaml::MiniYamlDoc::parse(data)?;
-    let nodes = doc.nodes();
-    fn count_nodes(nodes: &[cnc_formats::miniyaml::MiniYamlNode]) -> usize {
-        let mut total = nodes.len();
-        for n in nodes {
-            total += count_nodes(n.children());
-        }
-        total
-    }
-    let total = count_nodes(nodes);
-    println!("MiniYAML document");
-    println!("  Root nodes:  {}", nodes.len());
-    println!("  Total nodes: {total}");
-    for node in nodes {
-        let val = node.value().unwrap_or("");
-        let children = node.children().len();
-        if children > 0 {
-            println!("  {}: {val} ({children} children)", node.key());
-        } else {
-            println!("  {}: {val}", node.key());
-        }
-    }
-    Ok(())
-}
-
-#[cfg(feature = "midi")]
-fn inspect_mid(data: &[u8]) -> Result<(), cnc_formats::Error> {
-    let mid = cnc_formats::mid::MidFile::parse(data)?;
-    let format_name = match mid.format() {
-        cnc_formats::mid::MidiFormat::SingleTrack => "Type 0 (single track)",
-        cnc_formats::mid::MidiFormat::Parallel => "Type 1 (multi-track)",
-        cnc_formats::mid::MidiFormat::Sequential => "Type 2 (multi-song)",
-    };
-    let timing_str = match mid.timing() {
-        cnc_formats::mid::Timing::Metrical(tpb) => format!("{} ticks/beat", tpb.as_int()),
-        cnc_formats::mid::Timing::Timecode(fps, sub) => format!("{fps:?} fps, {sub} sub"),
-    };
-    println!("MIDI file (Standard MIDI File)");
-    println!("  Format:     {format_name}");
-    println!("  Timing:     {timing_str}");
-    println!("  Tracks:     {}", mid.track_count());
-    println!("  Events:     {}", mid.event_count());
-    println!("  Duration:   {:.2} s", mid.duration_secs());
-    let channels = mid.channels_used();
-    if !channels.is_empty() {
-        let ch_list: Vec<String> = channels.iter().map(|c| c.to_string()).collect();
-        println!("  Channels:   {}", ch_list.join(", "));
-    }
-    Ok(())
-}
-
-#[cfg(feature = "adl")]
-fn inspect_adl(data: &[u8]) -> Result<(), cnc_formats::Error> {
-    let adl = cnc_formats::adl::AdlFile::parse(data)?;
-    println!("ADL music (AdLib OPL2, Dune II)");
-    println!("  Instruments:      {}", adl.instruments.len());
-    println!("  Sub-songs:        {}", adl.subsongs.len());
-    println!("  Register writes:  {}", adl.total_register_writes());
-    match adl.estimated_duration_secs() {
-        Some(duration) => println!("  Est. duration:    {:.2} s", duration),
-        None => println!("  Est. duration:    unknown"),
-    }
-    for (i, subsong) in adl.subsongs.iter().enumerate() {
-        match subsong.track_program() {
-            Some(program) => {
-                println!(
-                    "  Sub-song {}: track={}, offset={}, data=opaque",
-                    i, program.index, program.offset
-                );
-            }
-            None => {
-                let speed = subsong
-                    .speed_ticks_per_step()
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                println!(
-                    "  Sub-song {}: speed={}, channels={}, writes={}",
-                    i,
-                    speed,
-                    subsong.channel_count(),
-                    subsong.register_write_count()
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(feature = "xmi")]
-fn inspect_xmi(data: &[u8]) -> Result<(), cnc_formats::Error> {
-    let xmi = cnc_formats::xmi::XmiFile::parse(data)?;
-    println!("XMI file (XMIDI / Miles Sound System)");
-    println!("  Sequences:  {}", xmi.sequence_count());
-    for (i, seq) in xmi.sequences.iter().enumerate() {
-        let timbre_count = seq.timbres.len();
-        let evnt_len = seq.event_data.len();
-        println!("  Sequence {i}: {evnt_len} bytes EVNT, {timbre_count} timbres");
-    }
-    Ok(())
-}
-
-#[cfg(feature = "meg")]
-fn inspect_meg(data: &[u8]) -> Result<(), cnc_formats::Error> {
-    let archive = cnc_formats::meg::MegArchive::parse(data)?;
-    let entries = archive.entries();
-    println!("MEG archive (Petroglyph)");
-    println!("  Entries:    {}", entries.len());
-    let total_size: u64 = entries.iter().map(|e| e.size).sum();
-    println!("  Total data: {} bytes", total_size);
-    println!();
-    println!("  {:>10}  {:>10}  Name", "Offset", "Size");
-    for entry in entries {
-        println!("  {:>10}  {:>10}  {}", entry.offset, entry.size, entry.name);
     }
     Ok(())
 }

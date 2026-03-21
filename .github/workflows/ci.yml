@@ -59,12 +59,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test ${{ matrix.features }}
 
+  cross:
+    name: Cross-compile (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - wasm32-unknown-unknown
+          - aarch64-linux-android
+          - aarch64-apple-ios
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo check --target ${{ matrix.target }} --no-default-features
+      - run: cargo check --target ${{ matrix.target }} --all-features
+
   msrv:
-    name: MSRV (1.85)
+    name: MSRV (1.86)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.86
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-features
       - run: cargo test --all-features

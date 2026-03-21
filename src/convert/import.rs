@@ -121,7 +121,7 @@ pub fn png_to_pal(png_data: &[u8]) -> Result<Vec<u8>, Error> {
     if info.color_type == png::ColorType::Indexed {
         if let Some(plte) = &info.palette {
             // Each palette entry is 3 bytes (R, G, B).  Pad to 256 entries.
-            let mut rgb8 = vec![0u8; 768];
+            let mut rgb8 = [0u8; 768];
             let copy_len = plte.len().min(768);
             if let Some(dest) = rgb8.get_mut(..copy_len) {
                 if let Some(src) = plte.get(..copy_len) {
@@ -155,7 +155,7 @@ pub fn png_to_pal(png_data: &[u8]) -> Result<Vec<u8>, Error> {
     }
 
     // Build 768-byte RGB8 buffer, pad remaining entries with black.
-    let mut rgb8 = vec![0u8; 768];
+    let mut rgb8 = [0u8; 768];
     for (idx, &[r, g, b]) in unique_colors.iter().enumerate() {
         let base = idx.saturating_mul(3);
         if let Some(slot) = rgb8.get_mut(base..base.saturating_add(3)) {

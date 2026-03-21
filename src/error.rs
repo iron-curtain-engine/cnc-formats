@@ -19,6 +19,7 @@
 //! prevent heap allocation in error paths.
 
 use std::fmt;
+use std::io::ErrorKind;
 
 /// Errors that can occur while parsing C&C format files.
 ///
@@ -27,6 +28,13 @@ use std::fmt;
 /// every value the caller needs to diagnose the problem.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Error {
+    /// An I/O operation on a reader or writer failed.
+    Io {
+        /// What operation was being attempted.
+        context: &'static str,
+        /// The underlying I/O error category.
+        kind: ErrorKind,
+    },
     /// Input data ended before the parser expected.
     UnexpectedEof {
         /// Minimum number of bytes needed to continue parsing.
@@ -84,6 +92,9 @@ impl fmt::Display for Error {
     /// available") without needing to attach a debugger.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Error::Io { context, kind } => {
+                write!(f, "I/O error while {context}: {kind}.")
+            }
             Error::UnexpectedEof { needed, available } => write!(
                 f,
                 "Unexpected end of input: needed at least {needed} bytes \

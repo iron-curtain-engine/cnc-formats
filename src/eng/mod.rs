@@ -17,18 +17,18 @@ const MAX_ENG_STRINGS: usize = (u16::MAX as usize) / 2;
 
 /// One entry in a Westwood string table.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EngString<'a> {
+pub struct EngString<'input> {
     /// Zero-based string index.
     pub index: usize,
     /// Raw on-disk offset of the NUL-terminated string.
     pub offset: u16,
     /// String bytes without the trailing NUL terminator.
-    pub bytes: &'a [u8],
+    pub bytes: &'input [u8],
 }
 
-impl<'a> EngString<'a> {
+impl<'input> EngString<'input> {
     /// Returns the string decoded lossily as UTF-8 for debugging/UI output.
-    pub fn as_lossy_str(&self) -> Cow<'a, str> {
+    pub fn as_lossy_str(&self) -> Cow<'input, str> {
         String::from_utf8_lossy(self.bytes)
     }
 
@@ -41,16 +41,16 @@ impl<'a> EngString<'a> {
 
 /// Parsed Westwood language string table.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EngFile<'a> {
+pub struct EngFile<'input> {
     /// Byte offset where the string blob begins.
     pub data_start: u16,
     /// Parsed table entries.
-    pub strings: Vec<EngString<'a>>,
+    pub strings: Vec<EngString<'input>>,
 }
 
-impl<'a> EngFile<'a> {
+impl<'input> EngFile<'input> {
     /// Parses a Westwood string table.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
         if data.len() < 2 {
             return Err(Error::UnexpectedEof {
                 needed: 2,

@@ -1,8 +1,8 @@
 [package]
 name = "cnc-formats"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.86"
 description = "Clean-room binary format parsers for Command & Conquer game files"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/iron-curtain-engine/cnc-formats"
@@ -52,12 +52,28 @@ cli = ["dep:clap", "dep:strict-path", "dep:sha2"]
 convert = ["dep:png", "dep:hound", "dep:gif"]
 
 [dev-dependencies]
+criterion = "0.8.2"
+
+[target.'cfg(unix)'.dev-dependencies]
+iai-callgrind = "0.16.1"
+
+[[bench]]
+name = "criterion_formats"
+harness = false
+
+[[bench]]
+name = "criterion_streaming"
+harness = false
+
+[[bench]]
+name = "callgrind_hotpaths"
+harness = false
 
 # ── Release profile ──────────────────────────────────────────────────────
 # LTO enables cross-crate inlining and dead-code elimination, which is
 # particularly important for this crate since it's used as a library by
-# the Iron Curtain engine.  `codegen-units = 1` maximises whole-program
-# optimisation at the cost of compile time (acceptable for release builds).
+# the Iron Curtain engine.  `codegen-units = 1` maximizes whole-program
+# optimization at the cost of compile time (acceptable for release builds).
 [profile.release]
 lto = true
 codegen-units = 1

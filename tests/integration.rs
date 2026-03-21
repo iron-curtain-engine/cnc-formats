@@ -7,9 +7,18 @@
 #[cfg(feature = "adl")]
 use cnc_formats::adl::AdlFile;
 use cnc_formats::aud::{self, AudFile, AUD_FLAG_16BIT, SCOMP_WESTWOOD};
+use cnc_formats::big::BigArchive;
+use cnc_formats::cps::CpsFile;
+use cnc_formats::csf::CsfFile;
+use cnc_formats::dip::DipFile;
+use cnc_formats::eng::EngFile;
 use cnc_formats::fnt::FntFile;
+use cnc_formats::hva::HvaFile;
 use cnc_formats::ini::IniFile;
 use cnc_formats::lcw;
+use cnc_formats::lut::LutFile;
+#[cfg(feature = "meg")]
+use cnc_formats::meg::MegArchive;
 #[cfg(feature = "midi")]
 use cnc_formats::mid::MidFile;
 #[cfg(feature = "miniyaml")]
@@ -17,8 +26,12 @@ use cnc_formats::miniyaml::MiniYamlDoc;
 use cnc_formats::mix::{self, MixArchive};
 use cnc_formats::pal::{Palette, PALETTE_BYTES};
 use cnc_formats::shp::ShpFile;
+use cnc_formats::shp_ts::ShpTsFile;
 use cnc_formats::tmp;
 use cnc_formats::vqa::VqaFile;
+use cnc_formats::vqp::VqpFile;
+use cnc_formats::vxl::VxlFile;
+use cnc_formats::w3d::W3dFile;
 use cnc_formats::wsa::WsaFile;
 #[cfg(feature = "xmi")]
 use cnc_formats::xmi::XmiFile;
@@ -492,6 +505,23 @@ fn all_parsers_adversarial_all_ff() {
     let _ = FntFile::parse(&data);
     let _ = tmp::TdTmpFile::parse(&data);
     let _ = tmp::RaTmpFile::parse(&data);
+    let _ = tmp::TsTmpFile::parse(&data);
+    // TS/RA2/Generals format parsers
+    let _ = VxlFile::parse(&data);
+    let _ = HvaFile::parse(&data);
+    let _ = ShpTsFile::parse(&data);
+    let _ = CsfFile::parse(&data);
+    let _ = CpsFile::parse(&data);
+    let _ = W3dFile::parse(&data);
+    // Archive format parsers
+    let _ = BigArchive::parse(&data);
+    #[cfg(feature = "meg")]
+    let _ = MegArchive::parse(&data);
+    // Exact-size / auxiliary format parsers
+    let _ = DipFile::parse(&data);
+    let _ = EngFile::parse(&data);
+    let _ = LutFile::parse(&data);
+    let _ = VqpFile::parse(&data);
     // Text format parsers
     let _ = IniFile::parse(&data);
     #[cfg(feature = "miniyaml")]
@@ -524,6 +554,23 @@ fn all_parsers_adversarial_all_zero() {
     let _ = FntFile::parse(&data);
     let _ = tmp::TdTmpFile::parse(&data);
     let _ = tmp::RaTmpFile::parse(&data);
+    let _ = tmp::TsTmpFile::parse(&data);
+    // TS/RA2/Generals format parsers
+    let _ = VxlFile::parse(&data);
+    let _ = HvaFile::parse(&data);
+    let _ = ShpTsFile::parse(&data);
+    let _ = CsfFile::parse(&data);
+    let _ = CpsFile::parse(&data);
+    let _ = W3dFile::parse(&data);
+    // Archive format parsers
+    let _ = BigArchive::parse(&data);
+    #[cfg(feature = "meg")]
+    let _ = MegArchive::parse(&data);
+    // Exact-size / auxiliary format parsers
+    let _ = DipFile::parse(&data);
+    let _ = EngFile::parse(&data);
+    let _ = LutFile::parse(&data);
+    let _ = VqpFile::parse(&data);
     // Text format parsers
     let _ = IniFile::parse(&data);
     #[cfg(feature = "miniyaml")]

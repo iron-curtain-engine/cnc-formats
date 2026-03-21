@@ -34,6 +34,8 @@ pub(crate) fn cmd_check(path: &str, explicit: Option<Format>) -> i32 {
     match fmt {
         Format::Mix => check_mix(&data, &mut warnings, &mut errors),
         Format::Big => check_big(&data, &mut warnings, &mut errors),
+        Format::Shp => check_shp(&data, &mut errors),
+        Format::Wsa => check_wsa(&data, &mut errors),
         #[cfg(feature = "meg")]
         Format::Meg => check_meg(&data, &mut warnings, &mut errors),
         _ => {
@@ -121,6 +123,27 @@ fn parse_for_check(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> 
         Format::Ini => {
             cnc_formats::ini::IniFile::parse(data)?;
         }
+        Format::Vxl => {
+            cnc_formats::vxl::VxlFile::parse(data)?;
+        }
+        Format::Hva => {
+            cnc_formats::hva::HvaFile::parse(data)?;
+        }
+        Format::ShpTs => {
+            cnc_formats::shp_ts::ShpTsFile::parse(data)?;
+        }
+        Format::Csf => {
+            cnc_formats::csf::CsfFile::parse(data)?;
+        }
+        Format::Cps => {
+            cnc_formats::cps::CpsFile::parse(data)?;
+        }
+        Format::W3d => {
+            cnc_formats::w3d::W3dFile::parse(data)?;
+        }
+        Format::TmpTs => {
+            cnc_formats::tmp::TsTmpFile::parse(data)?;
+        }
         #[cfg(feature = "miniyaml")]
         Format::Miniyaml => {
             cnc_formats::miniyaml::MiniYamlDoc::parse(data)?;
@@ -166,9 +189,13 @@ fn check_big(data: &[u8], _warnings: &mut Vec<String>, errors: &mut Vec<String>)
             .collect();
         sorted.sort_by_key(|&(off, _, _)| off);
 
-        for i in 1..sorted.len() {
-            let (prev_off, prev_size, prev_name) = sorted[i - 1];
-            let (cur_off, _, cur_name) = sorted[i];
+        for pair in sorted.windows(2) {
+            let Some((prev_off, prev_size, prev_name)) = pair.first().copied() else {
+                continue;
+            };
+            let Some((cur_off, _, cur_name)) = pair.get(1).copied() else {
+                continue;
+            };
             let prev_end = prev_off.saturating_add(prev_size);
             if prev_end > cur_off && prev_size > 0 {
                 errors.push(format!(
@@ -177,6 +204,30 @@ fn check_big(data: &[u8], _warnings: &mut Vec<String>, errors: &mut Vec<String>)
                 ));
             }
         }
+    }
+}
+
+/// Deep integrity checks for SHP sprites.
+fn check_shp(data: &[u8], errors: &mut Vec<String>) {
+    let shp = match cnc_formats::shp::ShpFile::parse(data) {
+        Ok(shp) => shp,
+        Err(_) => return,
+    };
+
+    if let Err(e) = shp.decode_frames() {
+        errors.push(format!("frame decode failed: {e}"));
+    }
+}
+
+/// Deep integrity checks for WSA animations.
+fn check_wsa(data: &[u8], errors: &mut Vec<String>) {
+    let wsa = match cnc_formats::wsa::WsaFile::parse(data) {
+        Ok(wsa) => wsa,
+        Err(_) => return,
+    };
+
+    if let Err(e) = wsa.decode_frames() {
+        errors.push(format!("frame decode failed: {e}"));
     }
 }
 
@@ -199,9 +250,13 @@ fn check_mix(data: &[u8], warnings: &mut Vec<String>, errors: &mut Vec<String>) 
             .collect();
         sorted.sort_by_key(|&(off, _, _)| off);
 
-        for i in 1..sorted.len() {
-            let (prev_off, prev_size, prev_crc) = sorted[i - 1];
-            let (cur_off, _, cur_crc) = sorted[i];
+        for pair in sorted.windows(2) {
+            let Some((prev_off, prev_size, prev_crc)) = pair.first().copied() else {
+                continue;
+            };
+            let Some((cur_off, _, cur_crc)) = pair.get(1).copied() else {
+                continue;
+            };
             let prev_end = prev_off.saturating_add(prev_size);
             if prev_end > cur_off && prev_size > 0 {
                 errors.push(format!(
@@ -214,7 +269,14 @@ fn check_mix(data: &[u8], warnings: &mut Vec<String>, errors: &mut Vec<String>) 
 
     // Check entry order (Westwood convention: signed i32 CRC sort on disk).
     // After parsing, entries are re-sorted by unsigned CRC.  This is informational.
-    let unsigned_sorted = entries.windows(2).all(|w| w[0].crc <= w[1].crc);
+    let unsigned_sorted = entries.windows(2).all(|w| {
+        let first = w.first().map(|entry| entry.crc);
+        let second = w.get(1).map(|entry| entry.crc);
+        match (first, second) {
+            (Some(first), Some(second)) => first <= second,
+            _ => true,
+        }
+    });
     if !unsigned_sorted {
         warnings.push("entries not sorted by unsigned CRC (unexpected after parse)".to_string());
     }
@@ -239,9 +301,13 @@ fn check_meg(data: &[u8], _warnings: &mut Vec<String>, errors: &mut Vec<String>)
             .collect();
         sorted.sort_by_key(|&(off, _, _)| off);
 
-        for i in 1..sorted.len() {
-            let (prev_off, prev_size, prev_name) = sorted[i - 1];
-            let (cur_off, _, cur_name) = sorted[i];
+        for pair in sorted.windows(2) {
+            let Some((prev_off, prev_size, prev_name)) = pair.first().copied() else {
+                continue;
+            };
+            let Some((cur_off, _, cur_name)) = pair.get(1).copied() else {
+                continue;
+            };
             let prev_end = prev_off.saturating_add(prev_size);
             if prev_end > cur_off && prev_size > 0 {
                 errors.push(format!(

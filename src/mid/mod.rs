@@ -49,12 +49,12 @@ pub use midly::Timing;
 /// timing, and format type.  The raw `midly::Smf` is available via the
 /// `smf()` method for advanced users who need direct event-level access.
 #[derive(Debug, Clone)]
-pub struct MidFile<'a> {
+pub struct MidFile<'input> {
     /// The parsed SMF structure from `midly`.
-    smf: midly::Smf<'a>,
+    smf: midly::Smf<'input>,
 }
 
-impl<'a> MidFile<'a> {
+impl<'input> MidFile<'input> {
     /// Parses a Standard MIDI File from a byte slice.
     ///
     /// Accepts SMF Type 0 (single track) and Type 1 (multi-track).
@@ -64,7 +64,7 @@ impl<'a> MidFile<'a> {
     ///
     /// - [`Error::InvalidMagic`] — data does not start with `MThd` header
     /// - [`Error::UnexpectedEof`] — data is truncated
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
         // V38: basic size check before handing off to midly.
         if data.len() < 14 {
             return Err(Error::UnexpectedEof {
@@ -106,7 +106,7 @@ impl<'a> MidFile<'a> {
 
     /// Returns a reference to the underlying `midly::Smf` for advanced access.
     #[inline]
-    pub fn smf(&self) -> &midly::Smf<'a> {
+    pub fn smf(&self) -> &midly::Smf<'input> {
         &self.smf
     }
 

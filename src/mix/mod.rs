@@ -58,114 +58,22 @@
 //! OpenRA's MIX loader, and binary analysis of game files.  Cross-reference:
 //! the original game defines the format in `MIXFILE.H`, `CRC.H`, `CRC.CPP`.
 
+mod builtin_names;
+mod entry_reader;
 pub mod known_names;
 pub mod lmd;
 pub mod metadata;
+/// Overlay-resolution helpers for mounted MIX archive sets.
+pub mod overlay;
+mod stream;
+pub use builtin_names::{builtin_name_map, builtin_name_stats, BuiltinNameStats};
+pub use entry_reader::MixEntryReader;
+pub use overlay::{MixOverlayIndex, MixOverlayRecord};
+pub use stream::MixArchiveReader;
 
 use crate::error::Error;
 use crate::read::{read_u16_le, read_u32_le};
-
-use std::collections::{hash_map::Entry, HashMap, HashSet};
-use std::sync::OnceLock;
-
-const RA2_FILENAME_CANDIDATES: &str = include_str!("known_names_ra2.txt");
-
-#[derive(Debug)]
-struct BuiltinNameDb {
-    names: HashMap<MixCrc, &'static str>,
-    ambiguous_crc_count: usize,
-}
-
-static BUILTIN_NAME_DB: OnceLock<BuiltinNameDb> = OnceLock::new();
-
-/// Summary of the built-in MIX filename resolver corpus.
-///
-/// Built-in names come from candidate filename corpora, not authoritative
-/// archive metadata.  Any CRC that maps to multiple candidates is treated as
-/// ambiguous and omitted from [`builtin_name_map()`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BuiltinNameStats {
-    /// Number of CRCs that resolve to a single built-in filename candidate.
-    pub resolved_crc_count: usize,
-    /// Number of CRCs omitted because the candidate corpus collided.
-    pub ambiguous_crc_count: usize,
-}
-
-/// Builds a CRC→filename lookup map from the built-in filename databases.
-///
-/// Built-in names are sourced from vendored TD/RA1 and RA2 filename corpora.
-/// The corpora are candidate lists, not authoritative archive metadata, so the
-/// resolver only keeps CRCs that map to exactly one candidate name.  Any
-/// ambiguous CRC collision is omitted instead of depending on list order.
-///
-/// This is useful as a default name map when the user doesn't supply
-/// `--names`.
-pub fn builtin_name_map() -> HashMap<MixCrc, String> {
-    builtin_name_db()
-        .names
-        .iter()
-        .map(|(&crc, &name)| (crc, name.to_string()))
-        .collect()
-}
-
-/// Returns counts for the built-in MIX filename resolver.
-pub fn builtin_name_stats() -> BuiltinNameStats {
-    let db = builtin_name_db();
-    BuiltinNameStats {
-        resolved_crc_count: db.names.len(),
-        ambiguous_crc_count: db.ambiguous_crc_count,
-    }
-}
-
-fn builtin_name_db() -> &'static BuiltinNameDb {
-    BUILTIN_NAME_DB.get_or_init(build_builtin_name_db)
-}
-
-fn build_builtin_name_db() -> BuiltinNameDb {
-    let mut names = HashMap::with_capacity(
-        known_names::KNOWN_FILENAMES.len() + RA2_FILENAME_CANDIDATES.lines().count(),
-    );
-    let mut ambiguous = HashSet::new();
-
-    for &name in known_names::KNOWN_FILENAMES {
-        insert_builtin_candidate(&mut names, &mut ambiguous, name);
-    }
-    for line in RA2_FILENAME_CANDIDATES.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        insert_builtin_candidate(&mut names, &mut ambiguous, trimmed);
-    }
-
-    BuiltinNameDb {
-        names,
-        ambiguous_crc_count: ambiguous.len(),
-    }
-}
-
-fn insert_builtin_candidate(
-    names: &mut HashMap<MixCrc, &'static str>,
-    ambiguous: &mut HashSet<MixCrc>,
-    name: &'static str,
-) {
-    let key = crc(name);
-    if ambiguous.contains(&key) {
-        return;
-    }
-
-    match names.entry(key) {
-        Entry::Vacant(slot) => {
-            slot.insert(name);
-        }
-        Entry::Occupied(slot) => {
-            if slot.get() != &name {
-                slot.remove();
-                ambiguous.insert(key);
-            }
-        }
-    }
-}
+use std::collections::HashMap;
 
 /// V38 safety cap: maximum number of entries in a MIX archive.
 ///
@@ -271,12 +179,12 @@ pub struct MixEntry {
 /// File data is accessed by calling [`MixArchive::get`] with a filename; the
 /// method hashes the name and performs a binary search over the entry table.
 #[derive(Debug)]
-pub struct MixArchive<'a> {
+pub struct MixArchive<'input> {
     entries: Vec<MixEntry>,
-    data: &'a [u8],
+    data: &'input [u8],
 }
 
-impl<'a> MixArchive<'a> {
+impl<'input> MixArchive<'input> {
     /// Parses a MIX archive from a byte slice.
     ///
     /// Supports **basic**, **extended** (SHA-1), and **Blowfish-encrypted**
@@ -289,7 +197,7 @@ impl<'a> MixArchive<'a> {
     /// - [`Error::EncryptedArchive`] — archive uses Blowfish encryption and
     ///   the `encrypted-mix` feature is not enabled.
     /// - [`Error::InvalidOffset`]  — a SubBlock offset points past the data.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
         let mut pos = 0usize;
 
         // ── Detect basic vs. extended format ──────────────────────────────
@@ -414,7 +322,7 @@ impl<'a> MixArchive<'a> {
     /// the flags word at offset 4.  After key derivation and header
     /// decryption, the file data section starts after the encrypted blocks.
     #[cfg(feature = "encrypted-mix")]
-    fn parse_encrypted(data: &'a [u8], _flags: u16) -> Result<Self, Error> {
+    fn parse_encrypted(data: &'input [u8], _flags: u16) -> Result<Self, Error> {
         use crate::mix_crypt;
 
         // flags bit 0 (SHA-1) is not used during parsing — the digest sits
@@ -539,7 +447,7 @@ impl<'a> MixArchive<'a> {
     /// The filename is uppercased and hashed with [`crc`] before the binary
     /// search, matching the original engine's lookup behaviour.
     #[inline]
-    pub fn get(&self, filename: &str) -> Option<&'a [u8]> {
+    pub fn get(&self, filename: &str) -> Option<&'input [u8]> {
         let key = crc(filename);
         self.get_by_crc(key)
     }
@@ -554,7 +462,7 @@ impl<'a> MixArchive<'a> {
     /// `parse()`, but safe slicing prevents a panic if invariants are
     /// ever broken by a future code change.
     #[inline]
-    pub fn get_by_crc(&self, key: MixCrc) -> Option<&'a [u8]> {
+    pub fn get_by_crc(&self, key: MixCrc) -> Option<&'input [u8]> {
         let idx = self.entries.binary_search_by_key(&key, |e| e.crc).ok()?;
         let entry = self.entries.get(idx)?;
         let start = entry.offset as usize;
@@ -568,7 +476,7 @@ impl<'a> MixArchive<'a> {
     /// callers can retrieve each physical SubBlock payload exactly as stored in
     /// the archive.
     #[inline]
-    pub fn get_by_index(&self, index: usize) -> Option<&'a [u8]> {
+    pub fn get_by_index(&self, index: usize) -> Option<&'input [u8]> {
         let entry = self.entries.get(index)?;
         let start = entry.offset as usize;
         let end = start.saturating_add(entry.size as usize);
@@ -612,5 +520,9 @@ impl<'a> MixArchive<'a> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_encrypted;
+#[cfg(test)]
+mod tests_streaming;
 #[cfg(test)]
 mod tests_validation;

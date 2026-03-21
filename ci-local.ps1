@@ -9,35 +9,204 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== cnc-formats - Local CI ===" -ForegroundColor Cyan
 
-# -- Locate cargo ---------------------------------------------------------
-if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    $cargoPaths = @(
-        "$env:USERPROFILE\.cargo\bin\cargo.exe",
-        "$env:HOME\.cargo\bin\cargo.exe",
-        "$env:HOME\.cargo\bin\cargo",
-        "C:\Users\$env:USERNAME\.cargo\bin\cargo.exe"
+# -- Locate Rust tools ----------------------------------------------------
+function Resolve-ToolCommand {
+    param(
+        [string]$Name,
+        [string[]]$Candidates
     )
 
-    $cargoFound = $false
-    foreach ($cargoPath in $cargoPaths) {
-        if (Test-Path $cargoPath) {
-            $env:PATH = (Split-Path $cargoPath) + ";" + $env:PATH
-            Write-Host "* Found cargo at: $cargoPath" -ForegroundColor Green
-            $cargoFound = $true
-            break
-        }
+    $command = Get-Command $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) {
+        return $command.Source
     }
 
-    if (-not $cargoFound -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-        Write-Host "ERROR: cargo not found. Install Rust from https://rustup.rs/" -ForegroundColor Red
-        exit 1
+    $pathSeparator = [System.IO.Path]::PathSeparator
+    $pathEntries = $env:PATH -split [regex]::Escape([string]$pathSeparator)
+
+    foreach ($candidate in $Candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate) -or -not (Test-Path $candidate)) {
+            continue
+        }
+
+        $toolDir = Split-Path $candidate
+        if (-not ($pathEntries -contains $toolDir)) {
+            $env:PATH = "$toolDir$pathSeparator$env:PATH"
+            $pathEntries = $env:PATH -split [regex]::Escape([string]$pathSeparator)
+        }
+
+        return (Resolve-Path $candidate).Path
+    }
+
+    return $null
+}
+
+$cargoCandidates = @(
+    "$env:USERPROFILE\.cargo\bin\cargo.exe",
+    "$env:HOME\.cargo\bin\cargo.exe",
+    "$env:HOME\.cargo\bin\cargo",
+    "C:\Users\$env:USERNAME\.cargo\bin\cargo.exe"
+)
+$rustcCandidates = @(
+    "$env:USERPROFILE\.cargo\bin\rustc.exe",
+    "$env:HOME\.cargo\bin\rustc.exe",
+    "$env:HOME\.cargo\bin\rustc",
+    "C:\Users\$env:USERNAME\.cargo\bin\rustc.exe"
+)
+$rustupCandidates = @(
+    "$env:USERPROFILE\.cargo\bin\rustup.exe",
+    "$env:HOME\.cargo\bin\rustup.exe",
+    "$env:HOME\.cargo\bin\rustup",
+    "C:\Users\$env:USERNAME\.cargo\bin\rustup.exe"
+)
+
+$script:CargoExe = Resolve-ToolCommand "cargo" $cargoCandidates
+if (-not $script:CargoExe) {
+    Write-Host "ERROR: cargo not found. Install Rust from https://rustup.rs/" -ForegroundColor Red
+    exit 1
+}
+
+$script:RustcExe = Resolve-ToolCommand "rustc" $rustcCandidates
+if (-not $script:RustcExe) {
+    Write-Host "ERROR: rustc not found next to cargo. Install Rust from https://rustup.rs/" -ForegroundColor Red
+    exit 1
+}
+
+$script:RustupExe = Resolve-ToolCommand "rustup" $rustupCandidates
+
+function global:cargo { & $script:CargoExe @args }
+function global:rustc { & $script:RustcExe @args }
+if ($script:RustupExe) {
+    function global:rustup { & $script:RustupExe @args }
+}
+
+Write-Host "* Using cargo: $script:CargoExe" -ForegroundColor Green
+Write-Host "* Using rustc: $script:RustcExe" -ForegroundColor Green
+
+# -- Rust version info -----------------------------------------------------
+$rustVersionResult = $null
+$rustVersion = ""
+
+# PowerShell launched from WSL can fail to surface stdout/exit codes from
+# direct `& exe args` invocations reliably. Use Start-Process for all external
+# tools so the script behaves consistently in native Windows and WSL-driven
+# sessions.
+function Invoke-ProcessCapture {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList = @()
+    )
+
+    $stdoutFile = [System.IO.Path]::GetTempFileName()
+    $stderrFile = [System.IO.Path]::GetTempFileName()
+
+    try {
+        $process = Start-Process `
+            -FilePath $FilePath `
+            -ArgumentList $ArgumentList `
+            -NoNewWindow `
+            -Wait `
+            -PassThru `
+            -RedirectStandardOutput $stdoutFile `
+            -RedirectStandardError $stderrFile
+
+        $stdout = if (Test-Path $stdoutFile) {
+            [System.IO.File]::ReadAllText($stdoutFile)
+        } else {
+            ""
+        }
+        $stderr = if (Test-Path $stderrFile) {
+            [System.IO.File]::ReadAllText($stderrFile)
+        } else {
+            ""
+        }
+
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            StdOut   = $stdout
+            StdErr   = $stderr
+        }
+    } finally {
+        Remove-Item $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
     }
 }
 
-Write-Host "* Using cargo: $(Get-Command cargo | Select-Object -ExpandProperty Source)" -ForegroundColor Green
+function Split-CommandTokens {
+    param([string]$Command)
 
-# -- Rust version info -----------------------------------------------------
-$rustVersion = & rustc --version
+    $matches = [regex]::Matches($Command, '\"(?:\\.|[^\"])*\"|''(?:\\.|[^''])*''|\S+')
+    $tokens = @()
+    foreach ($match in $matches) {
+        $token = $match.Value
+        if (
+            ($token.StartsWith('"') -and $token.EndsWith('"')) -or
+            ($token.StartsWith("'") -and $token.EndsWith("'"))
+        ) {
+            $token = $token.Substring(1, $token.Length - 2)
+        }
+        $tokens += $token
+    }
+    return $tokens
+}
+
+function Resolve-ExternalCommand {
+    param([string]$Command)
+
+    $tokens = Split-CommandTokens $Command
+    if ($tokens.Count -eq 0) {
+        throw "Cannot execute an empty command."
+    }
+
+    $toolName = $tokens[0]
+    $argumentList = if ($tokens.Count -gt 1) {
+        @($tokens[1..($tokens.Count - 1)])
+    } else {
+        @()
+    }
+
+    switch ($toolName) {
+        "cargo" {
+            return [pscustomobject]@{
+                FilePath     = $script:CargoExe
+                ArgumentList = $argumentList
+            }
+        }
+        "rustc" {
+            return [pscustomobject]@{
+                FilePath     = $script:RustcExe
+                ArgumentList = $argumentList
+            }
+        }
+        "rustup" {
+            if (-not $script:RustupExe) {
+                throw "rustup is not available."
+            }
+            return [pscustomobject]@{
+                FilePath     = $script:RustupExe
+                ArgumentList = $argumentList
+            }
+        }
+        default {
+            $commandInfo = Get-Command $toolName -ErrorAction Stop | Select-Object -First 1
+            return [pscustomobject]@{
+                FilePath     = $commandInfo.Source
+                ArgumentList = $argumentList
+            }
+        }
+    }
+}
+
+function Invoke-ResolvedCommand {
+    param([string]$Command)
+
+    $resolved = Resolve-ExternalCommand $Command
+    return Invoke-ProcessCapture -FilePath $resolved.FilePath -ArgumentList $resolved.ArgumentList
+}
+
+$rustVersionResult = Invoke-ProcessCapture -FilePath $script:RustcExe -ArgumentList @("--version")
+if ($rustVersionResult.ExitCode -eq 0) {
+    $rustVersion = $rustVersionResult.StdOut.Trim()
+}
 Write-Host "Rust version: $rustVersion" -ForegroundColor Magenta
 
 if ($rustVersion -match "nightly") {
@@ -62,11 +231,17 @@ function Run-Check {
     $ErrorActionPreference = "Continue"
 
     try {
-        Invoke-Expression "$Command 2>&1" | ForEach-Object { Write-Host $_ }
-        $exitCode = $LASTEXITCODE
+        $result = Invoke-ResolvedCommand $Command
+        $exitCode = $result.ExitCode
         $ErrorActionPreference = $oldErrorAction
 
         if ($exitCode -ne 0) {
+            if ($result.StdOut) {
+                $result.StdOut -split "(`r`n|`n|`r)" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Host $_ }
+            }
+            if ($result.StdErr) {
+                $result.StdErr -split "(`r`n|`n|`r)" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Host $_ }
+            }
             throw "Command failed with exit code $exitCode"
         }
         $endTime = Get-Date
@@ -97,11 +272,17 @@ function Run-Fix {
     $ErrorActionPreference = "Continue"
 
     try {
-        Invoke-Expression "$Command 2>&1" | ForEach-Object { Write-Host $_ }
-        $exitCode = $LASTEXITCODE
+        $result = Invoke-ResolvedCommand $Command
+        $exitCode = $result.ExitCode
         $ErrorActionPreference = $oldErrorAction
 
         if ($exitCode -ne 0) {
+            if ($result.StdOut) {
+                $result.StdOut -split "(`r`n|`n|`r)" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Host $_ }
+            }
+            if ($result.StdErr) {
+                $result.StdErr -split "(`r`n|`n|`r)" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Host $_ }
+            }
             throw "Command failed with exit code $exitCode"
         }
         $endTime = Get-Date
@@ -173,14 +354,68 @@ Run-Check "Format check" "cargo fmt --check"
 # -- 2. Clippy (all features) ----------------------------------------------
 Run-Check "Clippy (all features)" "cargo clippy --tests --all-features -- -D warnings"
 
-# -- 3. Clippy (no default features -- without blowfish) --------------------
-Run-Check "Clippy (no default features)" "cargo clippy --tests --no-default-features -- -D warnings"
+# -- 3. Compile check (no default features) --------------------------------
+# Catches missing #[cfg(feature)] gates. Full clippy is redundant here since
+# lint issues would also appear in the all-features run above.
+Run-Check "Compile check (no default features)" "cargo check --tests --no-default-features"
 
-# -- 4. Tests (all features) -----------------------------------------------
-Run-Check "Tests (all features)" "cargo test --all-features"
+# -- 4. Tests (parallel: all features + no default features) ---------------
+# Both test suites are independent — run them in parallel to halve wall time.
+Write-Host "Running: Tests (all features + no default features) [parallel]" -ForegroundColor Blue
 
-# -- 5. Tests (no default features) ----------------------------------------
-Run-Check "Tests (no default features)" "cargo test --no-default-features"
+$repoRoot = (Get-Location).Path
+
+$allFeaturesJob = Start-Job -ScriptBlock {
+    param($CargoExe, $WorkDir)
+    Set-Location $WorkDir
+    $result = & $CargoExe test --all-features 2>&1
+    [pscustomobject]@{
+        Output   = ($result -join "`n")
+        ExitCode = $LASTEXITCODE
+    }
+} -ArgumentList $script:CargoExe, $repoRoot
+
+$noDefaultJob = Start-Job -ScriptBlock {
+    param($CargoExe, $WorkDir, $TargetDir)
+    Set-Location $WorkDir
+    # Use a separate target dir to avoid lock contention with the parallel job.
+    $env:CARGO_TARGET_DIR = $TargetDir
+    $result = & $CargoExe test --no-default-features 2>&1
+    [pscustomobject]@{
+        Output   = ($result -join "`n")
+        ExitCode = $LASTEXITCODE
+    }
+} -ArgumentList $script:CargoExe, $repoRoot, "target/no-default"
+
+$startTime = Get-Date
+$allFeaturesResult = Receive-Job -Job $allFeaturesJob -Wait
+$noDefaultResult = Receive-Job -Job $noDefaultJob -Wait
+Remove-Job $allFeaturesJob, $noDefaultJob
+$duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds)
+
+$failed = $false
+if ($allFeaturesResult.ExitCode -ne 0) {
+    Write-Host "FAIL: Tests (all features)" -ForegroundColor Red
+    Write-Host $allFeaturesResult.Output
+    $failed = $true
+} else {
+    Write-Host "PASS: Tests (all features)" -ForegroundColor Green
+}
+
+if ($noDefaultResult.ExitCode -ne 0) {
+    Write-Host "FAIL: Tests (no default features)" -ForegroundColor Red
+    Write-Host $noDefaultResult.Output
+    $failed = $true
+} else {
+    Write-Host "PASS: Tests (no default features)" -ForegroundColor Green
+}
+
+Write-Host "Tests completed (${duration}s)" -ForegroundColor $(if ($failed) { "Red" } else { "Green" })
+Write-Host ""
+if ($failed) {
+    Write-Host "ERROR: Fix the test failures above before pushing." -ForegroundColor Red
+    exit 1
+}
 
 # -- 6. Documentation ------------------------------------------------------
 $env:RUSTDOCFLAGS = "-D warnings"
@@ -188,13 +423,19 @@ Run-Check "Documentation" "cargo doc --no-deps --document-private-items --all-fe
 
 # -- 7. License check (cargo-deny) -----------------------------------------
 Write-Host "Running license check..." -ForegroundColor Cyan
-if (Get-Command cargo-deny -ErrorAction SilentlyContinue) {
+if ((Invoke-ResolvedCommand "cargo deny --version").ExitCode -eq 0) {
     Run-Check "License check (cargo deny)" "cargo deny check licenses"
 } else {
     Write-Host "WARNING: cargo-deny not found. Installing..." -ForegroundColor Yellow
     try {
-        & cargo install cargo-deny --locked
-        if ($LASTEXITCODE -eq 0) {
+        $installResult = Invoke-ResolvedCommand "cargo install cargo-deny --locked"
+        if ($installResult.StdOut) {
+            $installResult.StdOut -split "(`r`n|`n|`r)" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Host $_ }
+        }
+        if ($installResult.StdErr) {
+            $installResult.StdErr -split "(`r`n|`n|`r)" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Host $_ }
+        }
+        if ($installResult.ExitCode -eq 0) {
             Run-Check "License check (cargo deny)" "cargo deny check licenses"
         } else { throw "install failed" }
     } catch {
@@ -205,13 +446,19 @@ if (Get-Command cargo-deny -ErrorAction SilentlyContinue) {
 
 # -- 8. Security audit (cargo-audit) ---------------------------------------
 Write-Host "Running security audit..." -ForegroundColor Cyan
-if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
+if ((Invoke-ResolvedCommand "cargo audit --version").ExitCode -eq 0) {
     Run-Check "Security audit" "cargo audit"
 } else {
     Write-Host "WARNING: cargo-audit not found. Installing..." -ForegroundColor Yellow
     try {
-        & cargo install cargo-audit --locked
-        if ($LASTEXITCODE -eq 0) {
+        $installResult = Invoke-ResolvedCommand "cargo install cargo-audit --locked"
+        if ($installResult.StdOut) {
+            $installResult.StdOut -split "(`r`n|`n|`r)" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Host $_ }
+        }
+        if ($installResult.StdErr) {
+            $installResult.StdErr -split "(`r`n|`n|`r)" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Host $_ }
+        }
+        if ($installResult.ExitCode -eq 0) {
             Run-Check "Security audit" "cargo audit"
         } else { throw "install failed" }
     } catch {
@@ -221,16 +468,38 @@ if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {
 }
 
 # -- 9. MSRV check (rust-version from Cargo.toml) --------------------------
-$msrv = "1.85"
+$cargoToml = Get-Content "Cargo.toml" -Raw
+$msrvMatch = [regex]::Match($cargoToml, '(?m)^\s*rust-version\s*=\s*"([^"]+)"')
+if (-not $msrvMatch.Success) {
+    Write-Host "WARNING: Could not determine rust-version from Cargo.toml. Skipping MSRV check." -ForegroundColor Yellow
+    $msrv = $null
+} else {
+    $msrv = $msrvMatch.Groups[1].Value
+}
+
+if (-not $msrv) {
+    Write-Host ""
+    Write-Host "All CI checks passed!" -ForegroundColor Green
+    Write-Host "Review any auto-fixes, then push." -ForegroundColor Blue
+    exit 0
+}
+
 Write-Host "Checking MSRV ($msrv)..." -ForegroundColor Cyan
-if (Get-Command rustup -ErrorAction SilentlyContinue) {
-    $toolchains = & rustup toolchain list
+if ($script:RustupExe) {
+    $toolchainResult = Invoke-ProcessCapture -FilePath $script:RustupExe -ArgumentList @("toolchain", "list")
+    $toolchains = $toolchainResult.StdOut
     $hasMsrv = $toolchains -match [regex]::Escape($msrv)
 
     if (-not $hasMsrv) {
         Write-Host "Installing Rust $msrv toolchain..." -ForegroundColor Yellow
-        & rustup toolchain install $msrv --profile minimal
-        if ($LASTEXITCODE -ne 0) {
+        $installResult = Invoke-ProcessCapture -FilePath $script:RustupExe -ArgumentList @("toolchain", "install", $msrv, "--profile", "minimal")
+        if ($installResult.StdOut) {
+            $installResult.StdOut -split "(`r`n|`n|`r)" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Host $_ }
+        }
+        if ($installResult.StdErr) {
+            $installResult.StdErr -split "(`r`n|`n|`r)" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Host $_ }
+        }
+        if ($installResult.ExitCode -ne 0) {
             Write-Host "WARNING: Could not install Rust $msrv. Skipping MSRV check." -ForegroundColor Yellow
             $hasMsrv = $false
         } else {
@@ -240,9 +509,16 @@ if (Get-Command rustup -ErrorAction SilentlyContinue) {
 
     if ($hasMsrv) {
         # Ensure clippy is available for MSRV
-        $clippy = & rustup component list --toolchain $msrv 2>$null | Select-String "clippy.*(installed)"
+        $componentResult = Invoke-ProcessCapture -FilePath $script:RustupExe -ArgumentList @("component", "list", "--toolchain", $msrv)
+        $clippy = $componentResult.StdOut | Select-String "clippy.*(installed)"
         if (-not $clippy) {
-            & rustup component add clippy --toolchain $msrv
+            $componentInstallResult = Invoke-ProcessCapture -FilePath $script:RustupExe -ArgumentList @("component", "add", "clippy", "--toolchain", $msrv)
+            if ($componentInstallResult.StdOut) {
+                $componentInstallResult.StdOut -split "(`r`n|`n|`r)" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Host $_ }
+            }
+            if ($componentInstallResult.StdErr) {
+                $componentInstallResult.StdErr -split "(`r`n|`n|`r)" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Host $_ }
+            }
         }
 
         $env:CARGO_TARGET_DIR = "target/msrv"

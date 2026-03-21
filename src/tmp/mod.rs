@@ -139,11 +139,11 @@ pub struct TdTmpHeader {
 
 /// A single tile image from a Tiberian Dawn TMP file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TdTmpTile<'a> {
+pub struct TdTmpTile<'input> {
     /// Sequential index of this tile in the icon set.
     pub index: u8,
     /// Raw palette-indexed pixel data (`icon_width × icon_height` bytes).
-    pub pixels: &'a [u8],
+    pub pixels: &'input [u8],
 }
 
 /// Parsed Tiberian Dawn TMP file.
@@ -153,18 +153,18 @@ pub struct TdTmpTile<'a> {
 /// The game uses this with externally-known grid dimensions to map
 /// grid positions to icon images.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TdTmpFile<'a> {
+pub struct TdTmpFile<'input> {
     /// File header (matches `IControl_Type`).
     pub header: TdTmpHeader,
     /// Raw icon-map data: `count` bytes from the `Map` offset.
     /// Each byte maps an icon slot to a display position.
     /// Empty if `map_offset` is 0.
-    pub map_data: &'a [u8],
+    pub map_data: &'input [u8],
     /// The distinct tile images stored in the file.
-    pub tiles: Vec<TdTmpTile<'a>>,
+    pub tiles: Vec<TdTmpTile<'input>>,
 }
 
-impl<'a> TdTmpFile<'a> {
+impl<'input> TdTmpFile<'input> {
     /// Parses a Tiberian Dawn TMP file from a raw byte slice.
     ///
     /// # Layout
@@ -177,7 +177,7 @@ impl<'a> TdTmpFile<'a> {
     ///
     /// Returns errors for truncated input, zero dimensions, or tile counts
     /// that would exceed the V38 safety cap.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
         // ── Header (32 bytes: 4 × i16 + 6 × i32) ────────────────────────
         if data.len() < TD_HEADER_SIZE {
             return Err(Error::UnexpectedEof {
@@ -332,25 +332,25 @@ impl RaTmpHeader {
 /// Tiles with offset 0 in the offset table are transparent/empty and are
 /// represented by `None` in the tile vector.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RaTmpTile<'a> {
+pub struct RaTmpTile<'input> {
     /// Column index in the tile grid.
     pub col: u32,
     /// Row index in the tile grid.
     pub row: u32,
     /// Raw palette-indexed pixel data (`tile_width × tile_height` bytes).
-    pub pixels: &'a [u8],
+    pub pixels: &'input [u8],
 }
 
 /// Parsed Red Alert TMP file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RaTmpFile<'a> {
+pub struct RaTmpFile<'input> {
     /// File header.
     pub header: RaTmpHeader,
     /// Tiles in grid order (row-major).  `None` entries are empty/transparent.
-    pub tiles: Vec<Option<RaTmpTile<'a>>>,
+    pub tiles: Vec<Option<RaTmpTile<'input>>>,
 }
 
-impl<'a> RaTmpFile<'a> {
+impl<'input> RaTmpFile<'input> {
     /// Parses a Red Alert TMP file from a raw byte slice.
     ///
     /// # Layout
@@ -364,7 +364,7 @@ impl<'a> RaTmpFile<'a> {
     ///
     /// Returns errors for truncated input, zero tile dimensions, or tile
     /// counts that exceed the V38 safety cap.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
         // ── Header ───────────────────────────────────────────────────────
         if data.len() < RA_HEADER_SIZE {
             return Err(Error::UnexpectedEof {
@@ -585,5 +585,12 @@ pub(crate) fn build_td_test_tmp() -> Vec<u8> {
     buf
 }
 
+/// Tiberian Sun / Red Alert 2 isometric terrain tiles.
+pub mod ts;
+pub use ts::*;
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_ts;

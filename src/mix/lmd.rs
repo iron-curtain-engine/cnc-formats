@@ -22,6 +22,7 @@
 //! not an official EA/Westwood format.
 
 use super::{crc, MixCrc};
+use crate::read::read_u32_le;
 use std::collections::HashMap;
 
 /// CRC of `"local mix database.dat"` — the well-known key for XCC's
@@ -37,10 +38,10 @@ pub const LMD_CRC: MixCrc = MixCrc(0x54C2_D545);
 /// and returns whatever names were successfully read.
 pub fn parse_lmd(data: &[u8]) -> HashMap<MixCrc, String> {
     let mut map = HashMap::new();
-    if data.len() < 4 {
-        return map;
-    }
-    let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let count = match read_u32_le(data, 0) {
+        Ok(count) => count as usize,
+        Err(_) => return map,
+    };
     // V38: cap at 131,072 to match MAX_MIX_ENTRIES.
     let count = count.min(super::MAX_MIX_ENTRIES);
 

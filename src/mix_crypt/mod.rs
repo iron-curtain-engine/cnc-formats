@@ -325,3 +325,5 @@ pub(crate) fn decrypt_mix_header(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_vectors;

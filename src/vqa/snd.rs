@@ -5,49 +5,550 @@
 //!
 //! SND0 = raw PCM, SND1 = Westwood ADPCM (8-bit), SND2 = IMA ADPCM (16-bit).
 //! Each decoder converts its input chunk into signed 16-bit PCM samples.
-//!
-//! ## References
-//!
 //! Gordan Ugarkovic, "VQA_INFO.TXT" (2004); Valery V. Anisimovsky;
 //! community C&C Modding Wiki; MultimediaWiki VQA page.  Clean-room
 //! implementation from publicly documented format specifications.
 
+use super::snd_ima::ima_decode_nibble;
 use crate::error::Error;
 use crate::read::read_u16_le;
+use std::borrow::Cow;
 
 /// V38: maximum decompressed audio chunk size (1 MB).  Half a second of
 /// 44.1kHz stereo 16-bit = ~176 KB; 1 MB is very generous.
 const MAX_AUDIO_CHUNK_SIZE: usize = 1024 * 1024;
+#[inline]
+fn pcm8_to_i16(byte: u8) -> i16 {
+    (byte as i16 - 128) * 256
+}
 
-// ─── SND0: Raw PCM ──────────────────────────────────────────────────────────
+#[derive(Debug, Clone)]
+pub(super) enum Snd1Mode {
+    Idle,
+    Delta {
+        delta: i16,
+    },
+    RawCopy {
+        remaining: usize,
+    },
+    Adpcm4 {
+        remaining: usize,
+        current_byte: Option<u8>,
+        stage: u8,
+    },
+    Adpcm2 {
+        remaining: usize,
+        current_byte: Option<u8>,
+        shift: u8,
+    },
+    Repeat {
+        remaining: usize,
+    },
+}
+#[derive(Debug, Clone)]
+pub(super) enum VqaAudioChunkDecoder<'data> {
+    Snd0Pcm16 {
+        data: Cow<'data, [u8]>,
+        pos: usize,
+    },
+    Snd0Pcm8 {
+        data: Cow<'data, [u8]>,
+        pos: usize,
+    },
+    Snd1 {
+        data: Cow<'data, [u8]>,
+        pos: usize,
+        payload_end: usize,
+        remaining_output: usize,
+        cur_sample: i16,
+        mode: Snd1Mode,
+    },
+    Snd2 {
+        data: Cow<'data, [u8]>,
+        pos: usize,
+        stereo: bool,
+        pending_sample: Option<i16>,
+    },
+}
 
-/// Decodes raw PCM from an SND0 chunk.
-///
-/// 8-bit data is unsigned (0–255, centered at 128); 16-bit data is signed
-/// little-endian.  Both are converted to signed 16-bit samples.
-pub(super) fn decode_snd0(data: &[u8], bits: u8) -> Result<Vec<i16>, Error> {
-    if bits == 16 {
-        // 16-bit signed LE samples.
-        let sample_count = data.len() / 2;
-        let mut samples = Vec::with_capacity(sample_count);
-        let mut pos: usize = 0;
-        while pos.saturating_add(1) < data.len() {
-            let lo = data.get(pos).copied().unwrap_or(0) as u16;
-            let hi = data.get(pos.saturating_add(1)).copied().unwrap_or(0) as u16;
-            samples.push((lo | (hi << 8)) as i16);
-            pos = pos.saturating_add(2);
-        }
-        Ok(samples)
-    } else {
-        // 8-bit unsigned samples, convert to signed 16-bit.
-        let mut samples = Vec::with_capacity(data.len());
-        for &byte in data {
-            // Unsigned 8-bit (0–255) → signed 16-bit: (byte - 128) * 256
-            let signed = (byte as i16 - 128) * 256;
-            samples.push(signed);
-        }
-        Ok(samples)
+impl VqaAudioChunkDecoder<'_> {
+    pub(super) fn open_borrowed<'data>(
+        fourcc: &[u8; 4],
+        data: &'data [u8],
+        bits: u8,
+        stereo: bool,
+    ) -> Result<Option<VqaAudioChunkDecoder<'data>>, Error> {
+        Self::open_with_data(fourcc, Cow::Borrowed(data), bits, stereo)
     }
+
+    fn open_with_data<'data>(
+        fourcc: &[u8; 4],
+        data: Cow<'data, [u8]>,
+        bits: u8,
+        stereo: bool,
+    ) -> Result<Option<VqaAudioChunkDecoder<'data>>, Error> {
+        match fourcc {
+            b"SND0" => {
+                if bits == 16 {
+                    Ok(Some(VqaAudioChunkDecoder::Snd0Pcm16 { data, pos: 0 }))
+                } else {
+                    Ok(Some(VqaAudioChunkDecoder::Snd0Pcm8 { data, pos: 0 }))
+                }
+            }
+            b"SND1" => Ok(Some(Self::open_snd1(data)?)),
+            b"SND2" => Ok(Some(VqaAudioChunkDecoder::Snd2 {
+                data,
+                pos: 0,
+                stereo,
+                pending_sample: None,
+            })),
+            _ => Ok(None),
+        }
+    }
+
+    fn open_snd1(data: Cow<'_, [u8]>) -> Result<VqaAudioChunkDecoder<'_>, Error> {
+        if data.len() < 4 {
+            return Err(Error::UnexpectedEof {
+                needed: 4,
+                available: data.len(),
+            });
+        }
+        let out_size = read_u16_le(data.as_ref(), 0)? as usize;
+        let size = read_u16_le(data.as_ref(), 2)? as usize;
+
+        if out_size > MAX_AUDIO_CHUNK_SIZE {
+            return Err(Error::InvalidSize {
+                value: out_size,
+                limit: MAX_AUDIO_CHUNK_SIZE,
+                context: "SND1 output size",
+            });
+        }
+
+        let payload_end = 4usize.saturating_add(size);
+        if data.get(4..payload_end).is_none() {
+            return Err(Error::UnexpectedEof {
+                needed: payload_end,
+                available: data.len(),
+            });
+        }
+
+        Ok(VqaAudioChunkDecoder::Snd1 {
+            data,
+            pos: 4,
+            payload_end,
+            remaining_output: out_size,
+            cur_sample: 0x80,
+            mode: if size == out_size {
+                Snd1Mode::RawCopy {
+                    remaining: out_size,
+                }
+            } else {
+                Snd1Mode::Idle
+            },
+        })
+    }
+}
+
+impl VqaAudioChunkDecoder<'static> {
+    pub(super) fn open_owned(
+        fourcc: &[u8; 4],
+        data: Vec<u8>,
+        bits: u8,
+        stereo: bool,
+    ) -> Result<Option<Self>, Error> {
+        Self::open_with_data(fourcc, Cow::Owned(data), bits, stereo)
+    }
+}
+
+impl VqaAudioChunkDecoder<'_> {
+    pub(super) fn is_finished(&self) -> bool {
+        match self {
+            Self::Snd0Pcm16 { data, pos } | Self::Snd0Pcm8 { data, pos } => *pos >= data.len(),
+            Self::Snd1 {
+                remaining_output,
+                mode,
+                ..
+            } => *remaining_output == 0 && matches!(mode, Snd1Mode::Idle),
+            Self::Snd2 {
+                data,
+                pos,
+                pending_sample,
+                ..
+            } => *pos >= data.len() && pending_sample.is_none(),
+        }
+    }
+
+    pub(super) fn remaining_sample_count(&self) -> usize {
+        match self {
+            Self::Snd0Pcm16 { data, pos } => (data.len().saturating_sub(*pos)) / 2,
+            Self::Snd0Pcm8 { data, pos } => data.len().saturating_sub(*pos),
+            Self::Snd1 {
+                remaining_output, ..
+            } => *remaining_output,
+            Self::Snd2 {
+                data,
+                pos,
+                pending_sample,
+                ..
+            } => data
+                .len()
+                .saturating_sub(*pos)
+                .saturating_mul(2)
+                .saturating_add(usize::from(pending_sample.is_some())),
+        }
+    }
+
+    pub(super) fn read_samples(
+        &mut self,
+        out: &mut [i16],
+        left_sample: &mut i32,
+        left_index: &mut usize,
+        right_sample: &mut i32,
+        right_index: &mut usize,
+    ) -> Result<usize, Error> {
+        match self {
+            Self::Snd0Pcm16 { data, pos } => read_snd0_pcm16(data, pos, out),
+            Self::Snd0Pcm8 { data, pos } => read_snd0_pcm8(data, pos, out),
+            Self::Snd1 {
+                data,
+                pos,
+                payload_end,
+                remaining_output,
+                cur_sample,
+                mode,
+            } => read_snd1_samples(
+                data,
+                pos,
+                *payload_end,
+                remaining_output,
+                cur_sample,
+                mode,
+                out,
+            ),
+            Self::Snd2 {
+                data,
+                pos,
+                stereo,
+                pending_sample,
+            } => read_snd2_samples(
+                data,
+                pos,
+                *stereo,
+                pending_sample,
+                out,
+                left_sample,
+                left_index,
+                right_sample,
+                right_index,
+            ),
+        }
+    }
+
+    pub(super) fn into_owned_data(self) -> Option<Vec<u8>> {
+        match self {
+            Self::Snd0Pcm16 { data, .. }
+            | Self::Snd0Pcm8 { data, .. }
+            | Self::Snd1 { data, .. }
+            | Self::Snd2 { data, .. } => match data {
+                Cow::Owned(data) => Some(data),
+                Cow::Borrowed(_) => None,
+            },
+        }
+    }
+}
+
+fn read_snd0_pcm16(data: &[u8], pos: &mut usize, out: &mut [i16]) -> Result<usize, Error> {
+    let mut written = 0usize;
+    let out_len = out.len();
+    while written < out.len() {
+        let end = pos.saturating_add(2);
+        let sample_bytes = match data.get(*pos..end) {
+            Some(bytes) => bytes,
+            None => break,
+        };
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(sample_bytes);
+        let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
+            needed: written.saturating_add(1),
+            available: out_len,
+        })?;
+        *slot = i16::from_le_bytes(buf);
+        *pos = end;
+        written = written.saturating_add(1);
+    }
+    Ok(written)
+}
+
+fn read_snd0_pcm8(data: &[u8], pos: &mut usize, out: &mut [i16]) -> Result<usize, Error> {
+    let mut written = 0usize;
+    let out_len = out.len();
+    while written < out.len() {
+        let byte = match data.get(*pos).copied() {
+            Some(byte) => byte,
+            None => break,
+        };
+        let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
+            needed: written.saturating_add(1),
+            available: out_len,
+        })?;
+        *slot = pcm8_to_i16(byte);
+        *pos = pos.saturating_add(1);
+        written = written.saturating_add(1);
+    }
+    Ok(written)
+}
+
+fn read_snd1_samples(
+    data: &[u8],
+    pos: &mut usize,
+    payload_end: usize,
+    remaining_output: &mut usize,
+    cur_sample: &mut i16,
+    mode: &mut Snd1Mode,
+    out: &mut [i16],
+) -> Result<usize, Error> {
+    let mut written = 0usize;
+    let out_len = out.len();
+
+    while written < out.len() && *remaining_output > 0 {
+        match mode {
+            Snd1Mode::Idle => {
+                if *pos >= payload_end {
+                    return Err(Error::UnexpectedEof {
+                        needed: pos.saturating_add(1),
+                        available: data.len(),
+                    });
+                }
+                let input_byte = data.get(*pos).copied().ok_or(Error::UnexpectedEof {
+                    needed: pos.saturating_add(1),
+                    available: data.len(),
+                })?;
+                *pos = pos.saturating_add(1);
+                let input = (input_byte as u16) << 2;
+                let code = (input >> 8) as u8;
+                let count_raw = ((input & 0xFF) >> 2) as i8;
+
+                *mode = match code {
+                    2 if count_raw & 0x20 != 0 => Snd1Mode::Delta {
+                        delta: ((count_raw << 3) >> 3) as i16,
+                    },
+                    2 => Snd1Mode::RawCopy {
+                        remaining: (count_raw as u8).saturating_add(1) as usize,
+                    },
+                    1 => Snd1Mode::Adpcm4 {
+                        remaining: (count_raw as u8).saturating_add(1) as usize,
+                        current_byte: None,
+                        stage: 0,
+                    },
+                    0 => Snd1Mode::Adpcm2 {
+                        remaining: (count_raw as u8).saturating_add(1) as usize,
+                        current_byte: None,
+                        shift: 0,
+                    },
+                    _ => Snd1Mode::Repeat {
+                        remaining: (count_raw as u8).saturating_add(1) as usize,
+                    },
+                };
+            }
+            Snd1Mode::Delta { delta } => {
+                *cur_sample = cur_sample.saturating_add(*delta).clamp(0, 255);
+                let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
+                    needed: written.saturating_add(1),
+                    available: out_len,
+                })?;
+                *slot = pcm8_to_i16(*cur_sample as u8);
+                *remaining_output = remaining_output.saturating_sub(1);
+                written = written.saturating_add(1);
+                *mode = Snd1Mode::Idle;
+            }
+            Snd1Mode::RawCopy { remaining } => {
+                if *pos >= payload_end {
+                    return Err(Error::UnexpectedEof {
+                        needed: pos.saturating_add(1),
+                        available: data.len(),
+                    });
+                }
+                let byte = data.get(*pos).copied().ok_or(Error::UnexpectedEof {
+                    needed: pos.saturating_add(1),
+                    available: data.len(),
+                })?;
+                let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
+                    needed: written.saturating_add(1),
+                    available: out_len,
+                })?;
+                *slot = pcm8_to_i16(byte);
+                *cur_sample = byte as i16;
+                *pos = pos.saturating_add(1);
+                *remaining = remaining.saturating_sub(1);
+                *remaining_output = remaining_output.saturating_sub(1);
+                written = written.saturating_add(1);
+                if *remaining == 0 {
+                    *mode = Snd1Mode::Idle;
+                }
+            }
+            Snd1Mode::Adpcm4 {
+                remaining,
+                current_byte,
+                stage,
+            } => {
+                if current_byte.is_none() {
+                    if *remaining == 0 {
+                        *mode = Snd1Mode::Idle;
+                        continue;
+                    }
+                    if *pos >= payload_end {
+                        return Err(Error::UnexpectedEof {
+                            needed: pos.saturating_add(1),
+                            available: data.len(),
+                        });
+                    }
+                    *current_byte = data.get(*pos).copied();
+                    *pos = pos.saturating_add(1);
+                    *remaining = remaining.saturating_sub(1);
+                    *stage = 0;
+                }
+
+                let byte = current_byte.unwrap_or(0);
+                let nibble = if *stage == 0 { byte & 0x0F } else { byte >> 4 };
+                let delta = WS_TABLE_4BIT.get(nibble as usize).copied().unwrap_or(0) as i16;
+                *cur_sample = cur_sample.saturating_add(delta).clamp(0, 255);
+                let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
+                    needed: written.saturating_add(1),
+                    available: out_len,
+                })?;
+                *slot = pcm8_to_i16(*cur_sample as u8);
+                *remaining_output = remaining_output.saturating_sub(1);
+                written = written.saturating_add(1);
+
+                if *stage == 0 {
+                    *stage = 1;
+                } else {
+                    *current_byte = None;
+                    *stage = 0;
+                    if *remaining == 0 {
+                        *mode = Snd1Mode::Idle;
+                    }
+                }
+            }
+            Snd1Mode::Adpcm2 {
+                remaining,
+                current_byte,
+                shift,
+            } => {
+                if current_byte.is_none() {
+                    if *remaining == 0 {
+                        *mode = Snd1Mode::Idle;
+                        continue;
+                    }
+                    if *pos >= payload_end {
+                        return Err(Error::UnexpectedEof {
+                            needed: pos.saturating_add(1),
+                            available: data.len(),
+                        });
+                    }
+                    *current_byte = data.get(*pos).copied();
+                    *pos = pos.saturating_add(1);
+                    *remaining = remaining.saturating_sub(1);
+                    *shift = 0;
+                }
+
+                let byte = current_byte.unwrap_or(0);
+                let nibble = ((byte >> *shift) & 0x03) as usize;
+                let delta = WS_TABLE_2BIT.get(nibble).copied().unwrap_or(0) as i16;
+                *cur_sample = cur_sample.saturating_add(delta).clamp(0, 255);
+                let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
+                    needed: written.saturating_add(1),
+                    available: out_len,
+                })?;
+                *slot = pcm8_to_i16(*cur_sample as u8);
+                *remaining_output = remaining_output.saturating_sub(1);
+                written = written.saturating_add(1);
+
+                *shift = shift.saturating_add(2);
+                if *shift >= 8 {
+                    *current_byte = None;
+                    *shift = 0;
+                    if *remaining == 0 {
+                        *mode = Snd1Mode::Idle;
+                    }
+                }
+            }
+            Snd1Mode::Repeat { remaining } => {
+                let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
+                    needed: written.saturating_add(1),
+                    available: out_len,
+                })?;
+                *slot = pcm8_to_i16(*cur_sample as u8);
+                *remaining = remaining.saturating_sub(1);
+                *remaining_output = remaining_output.saturating_sub(1);
+                written = written.saturating_add(1);
+                if *remaining == 0 {
+                    *mode = Snd1Mode::Idle;
+                }
+            }
+        }
+    }
+
+    Ok(written)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_snd2_samples(
+    data: &[u8],
+    pos: &mut usize,
+    stereo: bool,
+    pending_sample: &mut Option<i16>,
+    out: &mut [i16],
+    left_sample: &mut i32,
+    left_index: &mut usize,
+    right_sample: &mut i32,
+    right_index: &mut usize,
+) -> Result<usize, Error> {
+    let mut written = 0usize;
+    let out_len = out.len();
+
+    while written < out.len() {
+        if let Some(sample) = pending_sample.take() {
+            let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
+                needed: written.saturating_add(1),
+                available: out_len,
+            })?;
+            *slot = sample;
+            written = written.saturating_add(1);
+            continue;
+        }
+
+        let byte_index = *pos;
+        let byte = match data.get(byte_index).copied() {
+            Some(byte) => byte,
+            None => break,
+        };
+        *pos = pos.saturating_add(1);
+
+        let (sample, index) = if stereo && byte_index % 2 != 0 {
+            (right_sample as &mut i32, right_index as &mut usize)
+        } else {
+            (left_sample as &mut i32, left_index as &mut usize)
+        };
+        let low = ima_decode_nibble(byte & 0x0F, sample, index);
+        let high = ima_decode_nibble(byte >> 4, sample, index);
+
+        let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
+            needed: written.saturating_add(1),
+            available: out_len,
+        })?;
+        *slot = low;
+        written = written.saturating_add(1);
+
+        if let Some(slot) = out.get_mut(written) {
+            *slot = high;
+            written = written.saturating_add(1);
+        } else {
+            *pending_sample = Some(high);
+        }
+    }
+
+    Ok(written)
 }
 
 // ─── SND1: Westwood ADPCM ───────────────────────────────────────────────────
@@ -55,266 +556,3 @@ pub(super) fn decode_snd0(data: &[u8], bits: u8) -> Result<Vec<i16>, Error> {
 /// Westwood ADPCM (SND1) delta tables.
 const WS_TABLE_2BIT: [i8; 4] = [-2, -1, 0, 1];
 const WS_TABLE_4BIT: [i8; 16] = [-9, -8, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 8];
-
-/// Decodes Westwood ADPCM from an SND1 chunk (8-bit unsigned output).
-///
-/// The chunk has a 4-byte header: out_size (u16 LE) + size (u16 LE).
-/// If size == out_size, data is uncompressed.  Otherwise, WS ADPCM.
-/// Result is converted to signed 16-bit for consistency.
-pub(super) fn decode_snd1(data: &[u8]) -> Result<Vec<i16>, Error> {
-    if data.len() < 4 {
-        return Err(Error::UnexpectedEof {
-            needed: 4,
-            available: data.len(),
-        });
-    }
-    let out_size = read_u16_le(data, 0)? as usize;
-    let size = read_u16_le(data, 2)? as usize;
-
-    // V38: cap output size.
-    if out_size > MAX_AUDIO_CHUNK_SIZE {
-        return Err(Error::InvalidSize {
-            value: out_size,
-            limit: MAX_AUDIO_CHUNK_SIZE,
-            context: "SND1 output size",
-        });
-    }
-
-    // The `size` field is the declared payload length after the 4-byte SND1
-    // header.  Use it as a structural bound instead of decoding whatever
-    // trailing bytes happen to be present in the chunk buffer.
-    let payload_end = 4usize.saturating_add(size);
-    let payload = data.get(4..payload_end).ok_or(Error::UnexpectedEof {
-        needed: payload_end,
-        available: data.len(),
-    })?;
-
-    if size == out_size {
-        // Uncompressed: raw 8-bit unsigned → signed 16-bit.
-        let raw = payload.get(..out_size).ok_or(Error::UnexpectedEof {
-            needed: 4usize.saturating_add(out_size),
-            available: data.len(),
-        })?;
-        let mut samples = Vec::with_capacity(out_size);
-        for &byte in raw {
-            samples.push((byte as i16 - 128) * 256);
-        }
-        return Ok(samples);
-    }
-
-    // Westwood ADPCM decompression.
-    let mut cur_sample: i16 = 0x80; // unsigned 8-bit start
-    let mut samples = Vec::with_capacity(out_size);
-    let mut remaining = out_size;
-    let mut i: usize = 0;
-
-    while remaining > 0 && i < payload.len() {
-        let input_byte = payload.get(i).copied().ok_or(Error::UnexpectedEof {
-            needed: 4usize.saturating_add(i).saturating_add(1),
-            available: data.len(),
-        })?;
-        i = i.saturating_add(1);
-        let input = (input_byte as u16) << 2;
-        let code = (input >> 8) as u8;
-        let count_raw = ((input & 0xFF) >> 2) as i8;
-
-        match code {
-            2 => {
-                // No compression / small delta.
-                if count_raw & 0x20 != 0 {
-                    // Signed delta.
-                    let delta = ((count_raw << 3) >> 3) as i16;
-                    cur_sample = cur_sample.saturating_add(delta).clamp(0, 255);
-                    samples.push((cur_sample - 128) * 256);
-                    remaining = remaining.saturating_sub(1);
-                } else {
-                    // Copy (count+1) bytes from input.
-                    let count = (count_raw as u8).saturating_add(1) as usize;
-                    for _ in 0..count {
-                        if remaining == 0 {
-                            break;
-                        }
-                        let byte = payload.get(i).copied().ok_or(Error::UnexpectedEof {
-                            needed: 4usize.saturating_add(i).saturating_add(1),
-                            available: data.len(),
-                        })?;
-                        i = i.saturating_add(1);
-                        samples.push((byte as i16 - 128) * 256);
-                        cur_sample = byte as i16;
-                        remaining = remaining.saturating_sub(1);
-                    }
-                }
-            }
-            1 => {
-                // ADPCM 8-bit → 4-bit.
-                let count = (count_raw as u8).saturating_add(1) as usize;
-                for _ in 0..count {
-                    if remaining == 0 {
-                        break;
-                    }
-                    let byte = payload.get(i).copied().ok_or(Error::UnexpectedEof {
-                        needed: 4usize.saturating_add(i).saturating_add(1),
-                        available: data.len(),
-                    })?;
-                    i = i.saturating_add(1);
-
-                    // Lower nibble.
-                    let delta_lo = WS_TABLE_4BIT
-                        .get((byte & 0x0F) as usize)
-                        .copied()
-                        .unwrap_or(0) as i16;
-                    cur_sample = cur_sample.saturating_add(delta_lo).clamp(0, 255);
-                    samples.push((cur_sample - 128) * 256);
-                    remaining = remaining.saturating_sub(1);
-
-                    if remaining == 0 {
-                        break;
-                    }
-
-                    // Higher nibble.
-                    let delta_hi = WS_TABLE_4BIT
-                        .get((byte >> 4) as usize)
-                        .copied()
-                        .unwrap_or(0) as i16;
-                    cur_sample = cur_sample.saturating_add(delta_hi).clamp(0, 255);
-                    samples.push((cur_sample - 128) * 256);
-                    remaining = remaining.saturating_sub(1);
-                }
-            }
-            0 => {
-                // ADPCM 8-bit → 2-bit.
-                let count = (count_raw as u8).saturating_add(1) as usize;
-                for _ in 0..count {
-                    if remaining == 0 {
-                        break;
-                    }
-                    let byte = payload.get(i).copied().ok_or(Error::UnexpectedEof {
-                        needed: 4usize.saturating_add(i).saturating_add(1),
-                        available: data.len(),
-                    })?;
-                    i = i.saturating_add(1);
-
-                    for shift in [0u8, 2, 4, 6] {
-                        if remaining == 0 {
-                            break;
-                        }
-                        let nibble = ((byte >> shift) & 0x03) as usize;
-                        let delta = WS_TABLE_2BIT.get(nibble).copied().unwrap_or(0) as i16;
-                        cur_sample = cur_sample.saturating_add(delta).clamp(0, 255);
-                        samples.push((cur_sample - 128) * 256);
-                        remaining = remaining.saturating_sub(1);
-                    }
-                }
-            }
-            _ => {
-                // Default: repeat cur_sample (count+1) times.
-                let count = (count_raw as u8).saturating_add(1) as usize;
-                for _ in 0..count {
-                    if remaining == 0 {
-                        break;
-                    }
-                    samples.push((cur_sample - 128) * 256);
-                    remaining = remaining.saturating_sub(1);
-                }
-            }
-        }
-    }
-
-    if remaining > 0 {
-        return Err(Error::UnexpectedEof {
-            needed: 4usize.saturating_add(i).saturating_add(1),
-            available: data.len(),
-        });
-    }
-
-    Ok(samples)
-}
-
-// ─── SND2: IMA ADPCM ────────────────────────────────────────────────────────
-
-/// Standard IMA ADPCM step table (89 entries, indices 0–88).
-/// Same table used by aud::decode_adpcm — duplicated here to keep VQA
-/// audio decoding self-contained without depending on aud module internals.
-const IMA_STEP_TABLE: [i32; 89] = [
-    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66,
-    73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449,
-    494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272,
-    2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493,
-    10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
-];
-
-/// IMA ADPCM step-index adjustment table (16 entries).
-const IMA_INDEX_ADJ: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
-
-/// Decodes a single IMA ADPCM nibble, updating state in place.
-#[inline]
-fn ima_decode_nibble(nibble: u8, sample: &mut i32, index: &mut usize) -> i16 {
-    let step = IMA_STEP_TABLE.get(*index).copied().unwrap_or(7);
-    let code = (nibble & 0x07) as i32;
-
-    // Reconstruct delta from step and code bits.
-    let mut delta = step >> 3;
-    if code & 4 != 0 {
-        delta = delta.saturating_add(step);
-    }
-    if code & 2 != 0 {
-        delta = delta.saturating_add(step >> 1);
-    }
-    if code & 1 != 0 {
-        delta = delta.saturating_add(step >> 2);
-    }
-    if nibble & 0x08 != 0 {
-        delta = -delta;
-    }
-
-    *sample = (*sample).saturating_add(delta).clamp(-32768, 32767);
-    let adj = IMA_INDEX_ADJ
-        .get((nibble & 0x0F) as usize)
-        .copied()
-        .unwrap_or(-1);
-    *index = ((*index as i32).saturating_add(adj)).clamp(0, 88) as usize;
-
-    *sample as i16
-}
-
-/// Decodes IMA ADPCM from an SND2 chunk.
-///
-/// State (sample + step_index) is maintained across chunks per VQA spec.
-/// For stereo, C&C/RA use interleaved layout: `LL RR LL RR …` (each byte
-/// has two nibbles for the same channel).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn decode_snd2(
-    data: &[u8],
-    stereo: bool,
-    left_sample: &mut i32,
-    left_index: &mut usize,
-    right_sample: &mut i32,
-    right_index: &mut usize,
-) -> Result<Vec<i16>, Error> {
-    let mut samples = Vec::with_capacity(data.len().saturating_mul(4));
-
-    if stereo {
-        // C&C/RA stereo: bytes alternate L/R channels.
-        // Each byte has 2 nibbles for the same channel.
-        for (i, &byte) in data.iter().enumerate() {
-            let (sample, index) = if i % 2 == 0 {
-                (left_sample as &mut i32, left_index as &mut usize)
-            } else {
-                (right_sample as &mut i32, right_index as &mut usize)
-            };
-            let lo = ima_decode_nibble(byte & 0x0F, sample, index);
-            let hi = ima_decode_nibble(byte >> 4, sample, index);
-            samples.push(lo);
-            samples.push(hi);
-        }
-    } else {
-        for &byte in data {
-            let lo = ima_decode_nibble(byte & 0x0F, left_sample, left_index);
-            let hi = ima_decode_nibble(byte >> 4, left_sample, left_index);
-            samples.push(lo);
-            samples.push(hi);
-        }
-    }
-
-    Ok(samples)
-}

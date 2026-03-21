@@ -48,8 +48,8 @@ fn write_vlq(buf: &mut Vec<u8>, value: u32) {
 struct MidiEvent {
     /// Absolute tick from the start of the track.
     abs_tick: u32,
-    /// Raw MIDI bytes (status + data bytes).
-    bytes: Vec<u8>,
+    /// Raw MIDI bytes: [status, data1, data2].
+    bytes: [u8; 3],
 }
 
 /// Converts detected notes to a complete Standard MIDI File (Type 0).
@@ -99,12 +99,12 @@ pub fn notes_to_smf(
         // Note-On.
         events.push(MidiEvent {
             abs_tick: onset_tick,
-            bytes: vec![0x90 | channel, note.note, note.velocity],
+            bytes: [0x90 | channel, note.note, note.velocity],
         });
         // Note-Off.
         events.push(MidiEvent {
             abs_tick: off_tick,
-            bytes: vec![0x80 | channel, note.note, 0],
+            bytes: [0x80 | channel, note.note, 0],
         });
     }
 

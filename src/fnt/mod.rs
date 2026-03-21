@@ -110,7 +110,7 @@ pub struct FntHeader {
 /// low nibble first.  Use [`FntGlyph::pixel`] to query individual pixel
 /// color indices.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FntGlyph<'a> {
+pub struct FntGlyph<'input> {
     /// Character code point (0–255).
     pub code: u8,
     /// Glyph width in pixels.
@@ -121,7 +121,7 @@ pub struct FntGlyph<'a> {
     pub data_rows: u8,
     /// Raw 4bpp nibble-packed row-major bitmap data (borrowed from input).
     /// Size: `ceil(width / 2) × data_rows` bytes.
-    pub data: &'a [u8],
+    pub data: &'input [u8],
 }
 
 impl FntGlyph<'_> {
@@ -166,14 +166,14 @@ impl FntGlyph<'_> {
 /// Contains the font header and all glyph entries.  Glyphs with width 0
 /// have empty data (space characters, unused code points).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FntFile<'a> {
+pub struct FntFile<'input> {
     /// File header.
     pub header: FntHeader,
     /// Glyph entries (indexed by character code, length = `header.num_chars`).
-    pub glyphs: Vec<FntGlyph<'a>>,
+    pub glyphs: Vec<FntGlyph<'input>>,
 }
 
-impl<'a> FntFile<'a> {
+impl<'input> FntFile<'input> {
     /// Parses a FNT file from a raw byte slice.
     ///
     /// # Errors
@@ -183,7 +183,7 @@ impl<'a> FntFile<'a> {
     ///   count exceed V38 caps.
     /// - [`Error::InvalidMagic`] if the compression flag is non-zero or
     ///   the data-block count is not 5.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'input [u8]) -> Result<Self, Error> {
         // ── Header (20 bytes) ────────────────────────────────────────────
         if data.len() < FNT_HEADER_SIZE {
             return Err(Error::UnexpectedEof {

@@ -16,6 +16,7 @@
 //! | WSA + PAL | PNG (per frame) | [`wsa_frames_to_png`] |
 //! | WSA + PAL | GIF (animated) | [`wsa_frames_to_gif`] |
 //! | FNT | PNG (font atlas) | [`fnt_to_png`] |
+//! | VQA | MKV (V_UNCOMPRESSED + PCM) | [`vqa_to_mkv`] |
 //!
 //! ## Import — common formats → C&C
 //!
@@ -38,11 +39,13 @@
 mod avi;
 mod export;
 mod import;
+pub(crate) mod mkv;
 
 // Re-export all public conversion functions.
 pub use avi::{decode_avi, encode_avi, AviContent};
 pub use export::*;
 pub use import::*;
+pub use mkv::encode_mkv;
 
 use crate::error::Error;
 use crate::pal::Palette;
@@ -398,3 +401,9 @@ mod tests_validation;
 
 #[cfg(test)]
 mod tests_avi;
+
+#[cfg(test)]
+mod tests_roundtrip;
+
+#[cfg(test)]
+mod tests_mkv;

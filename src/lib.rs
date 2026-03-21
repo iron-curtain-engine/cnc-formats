@@ -17,12 +17,18 @@
 //! | [`eng`]         | `.eng` | Westwood language string tables          |
 //! | [`lcw`]         | —      | LCW decompression used by SHP/VQA/WSA    |
 //! | [`lut`]         | `.lut` | Red Alert Chrono Vortex lookup tables    |
-//! | [`tmp`]         | `.tmp` | Terrain tile sets (TD + RA variants)     |
+//! | [`tmp`]         | `.tmp` | Terrain tile sets (TD + RA + TS/RA2 iso) |
 //! | [`vqa`]         | `.vqa` | VQ video container (IFF chunk-based)     |
 //! | [`vqp`]         | `.vqp` | VQA palette interpolation sidecar tables |
 //! | [`wsa`]         | `.wsa` | LCW + XOR-delta animation                |
 //! | [`fnt`]         | `.fnt` | Bitmap fonts (variable character count)   |
-//! | [`ini`]         | `.ini` | Classic C&C rules file parser             |
+//! | [`cps`]         | `.cps` | Compressed full-screen images            |
+//! | [`csf`]         | `.csf` | Compiled string tables (TS/RA2/Generals) |
+//! | [`shp_ts`]      | `.shp` | TS/RA2 sprite frames (scanline RLE)      |
+//! | [`vxl`]         | `.vxl` | Voxel models (TS/RA2)                    |
+//! | [`hva`]         | `.hva` | Hierarchical voxel animation (TS/RA2)    |
+//! | [`w3d`]         | `.w3d` | Westwood 3D meshes (Generals/SAGE)       |
+//! | [`ini`]         | `.ini` | Classic C&C rules file parser            |
 //!
 //! Feature-gated:
 //!
@@ -41,7 +47,7 @@
 //! and binary analysis.  This crate contains **no EA-derived code**, which
 //! is why it can be licensed under MIT/Apache-2.0.
 //!
-//! EA GPL-derived parsing logic lives in the `ra-formats` crate (GPL v3)
+//! EA GPL-derived parsing logic lives in the `ic-cnc-content` crate (GPL v3)
 //! in the Iron Curtain engine repository.
 //!
 //! ## Design Authority
@@ -51,6 +57,7 @@
 //!
 //! Related decisions: D076 (standalone crate extraction), D003 (YAML format).
 
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 // ── Public modules ───────────────────────────────────────────────────────────
@@ -61,10 +68,15 @@ pub mod aud;
 pub mod big;
 #[cfg(feature = "convert")]
 pub mod convert;
+/// Compressed Screen Picture images (TD/RA1/Dune II title screens).
+pub mod cps;
+pub mod csf;
 pub mod dip;
 pub mod eng;
 pub mod error;
 pub mod fnt;
+/// Hierarchical Voxel Animation transforms (TS/RA2).
+pub mod hva;
 pub mod ini;
 pub mod lcw;
 pub mod lut;
@@ -74,11 +86,18 @@ pub mod mix_crypt;
 pub mod pal;
 pub(crate) mod read;
 pub mod shp;
+/// TS/RA2 SHP sprites (scanline RLE, distinct from TD/RA1 [`shp`]).
+pub mod shp_ts;
 /// Format detection by content inspection (magic-byte sniffing).
 pub mod sniff;
+pub(crate) mod stream_io;
 pub mod tmp;
 pub mod vqa;
 pub mod vqp;
+/// Voxel models for TS/RA2 3D units.
+pub mod vxl;
+/// Westwood 3D chunk-based mesh format (Generals/SAGE engine).
+pub mod w3d;
 pub mod wsa;
 
 #[cfg(feature = "miniyaml")]
