@@ -80,6 +80,8 @@ const VIDEO_ID: u32 = 0xE0;
 const PIXEL_WIDTH: u32 = 0xB0;
 const PIXEL_HEIGHT: u32 = 0xBA;
 const UNCOMPRESSED_FOURCC: u32 = 0x2E_B524;
+const COLOUR: u32 = 0x55B0;
+const BITS_PER_CHANNEL: u32 = 0x55B2;
 
 const AUDIO_ID: u32 = 0xE1;
 const SAMPLING_FREQUENCY: u32 = 0xB5;
@@ -89,6 +91,23 @@ const BIT_DEPTH: u32 = 0x6264;
 const CLUSTER: u32 = 0x1F43_B675;
 const TIMESTAMP_ID: u32 = 0xE7;
 const SIMPLE_BLOCK: u32 = 0xA3;
+
+const SEEK_HEAD: u32 = 0x114D_9B74;
+const SEEK: u32 = 0x4DBB;
+const SEEK_ID_EL: u32 = 0x53AB;
+const SEEK_POSITION: u32 = 0x53AC;
+
+const CUES: u32 = 0x1C53_BB6B;
+const CUE_POINT: u32 = 0xBB;
+const CUE_TIME: u32 = 0xB3;
+const CUE_TRACK_POSITIONS: u32 = 0xB7;
+const CUE_TRACK: u32 = 0xF7;
+const CUE_CLUSTER_POSITION: u32 = 0xF1;
+
+/// Total bytes reserved at the start of the Segment for the SeekHead element
+/// plus a padding Void element.  160 bytes is sufficient for 3 Seek entries
+/// (Info, Tracks, Cues) with positions up to 4 GB.
+const SEEKHEAD_RESERVE: usize = 160;
 
 // ─── Video Codec Selection ──────────────────────────────────────────────────
 
@@ -212,14 +231,25 @@ pub fn encode_mkv<T: AsRef<[u8]>>(
     let mut out = Vec::with_capacity(estimated);
 
     // ── EBML Header ────────────────────────────────────────────────────
+    // V_UNCOMPRESSED is a Matroska v4 codec (RFC 9559); V_MS/VFW/FOURCC
+    // only requires v2.  DocTypeReadVersion tells the player the minimum
+    // version it must support to decode this file.
+    let (doc_type_version, doc_type_read_version) = match video_codec {
+        MkvVideoCodec::Uncompressed => (4u64, 4u64),
+        MkvVideoCodec::Vfw => (2, 2),
+    };
     let mut ebml_children = Vec::new();
     write_uint_element(&mut ebml_children, EBML_VERSION, 1);
     write_uint_element(&mut ebml_children, EBML_READ_VERSION, 1);
     write_uint_element(&mut ebml_children, EBML_MAX_ID_LENGTH, 4);
     write_uint_element(&mut ebml_children, EBML_MAX_SIZE_LENGTH, 8);
     write_string_element(&mut ebml_children, DOC_TYPE, "matroska");
-    write_uint_element(&mut ebml_children, DOC_TYPE_VERSION, 4);
-    write_uint_element(&mut ebml_children, DOC_TYPE_READ_VERSION, 2);
+    write_uint_element(&mut ebml_children, DOC_TYPE_VERSION, doc_type_version);
+    write_uint_element(
+        &mut ebml_children,
+        DOC_TYPE_READ_VERSION,
+        doc_type_read_version,
+    );
     write_master_element(&mut out, EBML_ID, &ebml_children);
 
     // ── Segment (size patched at the end) ──────────────────────────────
@@ -228,6 +258,10 @@ pub fn encode_mkv<T: AsRef<[u8]>>(
     write_unknown_size_placeholder(&mut out);
     let segment_data_start = out.len();
 
+    // Reserve space for the SeekHead (patched after Cues are written).
+    let seekhead_start = out.len();
+    out.extend_from_slice(&build_void(SEEKHEAD_RESERVE));
+
     // ── Segment Info ───────────────────────────────────────────────────
     let duration_ms = (frames.len() as f64) * 1000.0 / (fps as f64);
     let mut info_buf = Vec::new();
@@ -235,6 +269,7 @@ pub fn encode_mkv<T: AsRef<[u8]>>(
     write_float_element(&mut info_buf, DURATION_ID, duration_ms);
     write_string_element(&mut info_buf, MUXING_APP, "cnc-formats");
     write_string_element(&mut info_buf, WRITING_APP, "cnc-formats");
+    let info_pos = out.len() - segment_data_start;
     write_master_element(&mut out, INFO, &info_buf);
 
     // ── Tracks ─────────────────────────────────────────────────────────
@@ -258,7 +293,12 @@ pub fn encode_mkv<T: AsRef<[u8]>>(
         MkvVideoCodec::Uncompressed => {
             // V_UNCOMPRESSED — native Matroska uncompressed video (RFC 9559).
             // BI_RGB FourCC (all zeros) declares BGR24 top-down.
+            // Colour.BitsPerChannel = 8 completes the pixel format declaration
+            // (FourCC alone is ambiguous about bit depth).
             write_binary_element(&mut video_sub, UNCOMPRESSED_FOURCC, &[0, 0, 0, 0]);
+            let mut colour_buf = Vec::new();
+            write_uint_element(&mut colour_buf, BITS_PER_CHANNEL, 8);
+            write_master_element(&mut video_sub, COLOUR, &colour_buf);
             write_string_element(&mut track1, CODEC_ID, "V_UNCOMPRESSED");
         }
         MkvVideoCodec::Vfw => {
@@ -290,17 +330,19 @@ pub fn encode_mkv<T: AsRef<[u8]>>(
         write_master_element(&mut tracks_buf, TRACK_ENTRY, &track2);
     }
 
+    let tracks_pos = out.len() - segment_data_start;
     write_master_element(&mut out, TRACKS, &tracks_buf);
 
     // ── Clusters ───────────────────────────────────────────────────────
     let ms_per_frame = 1000.0 / (fps as f64);
-    let max_cluster_offset: i64 = 30_000; // start a new cluster every ~30 s
+    let max_cluster_offset: i64 = 2_000; // start a new cluster every ~2 s
 
     let mut audio_pos: usize = 0;
     let mut audio_remainder: u64 = 0;
     let mut cluster_start_ms: u64 = 0;
     let mut cluster_buf = Vec::new();
     let mut in_cluster = false;
+    let mut cluster_entries: Vec<(u64, usize)> = Vec::new(); // (timestamp_ms, segment offset)
 
     for (i, rgba) in frames.iter().enumerate() {
         let frame_ms = ((i as f64) * ms_per_frame) as u64;
@@ -309,6 +351,7 @@ pub fn encode_mkv<T: AsRef<[u8]>>(
         // Start a new cluster when the offset would exceed the limit.
         if !in_cluster || offset_from_cluster > max_cluster_offset {
             if in_cluster {
+                cluster_entries.push((cluster_start_ms, out.len() - segment_data_start));
                 write_master_element(&mut out, CLUSTER, &cluster_buf);
                 cluster_buf.clear();
             }
@@ -347,6 +390,7 @@ pub fn encode_mkv<T: AsRef<[u8]>>(
 
     // Flush the last open cluster.
     if in_cluster && !cluster_buf.is_empty() {
+        cluster_entries.push((cluster_start_ms, out.len() - segment_data_start));
         write_master_element(&mut out, CLUSTER, &cluster_buf);
     }
 
@@ -360,6 +404,21 @@ pub fn encode_mkv<T: AsRef<[u8]>>(
             write_simple_block(&mut tail, 2, 0, remaining);
             write_master_element(&mut out, CLUSTER, &tail);
         }
+    }
+
+    // ── Cues (seek index) ────────────────────────────────────────────
+    let cues_pos = out.len() - segment_data_start;
+    let cues_buf = build_cues(&cluster_entries);
+    write_master_element(&mut out, CUES, &cues_buf);
+
+    // ── SeekHead (patch over the reserved Void) ──────────────────────
+    let seekhead_bytes =
+        build_seekhead(&[(INFO, info_pos), (TRACKS, tracks_pos), (CUES, cues_pos)]);
+    let padding = SEEKHEAD_RESERVE.saturating_sub(seekhead_bytes.len());
+    let mut patch = seekhead_bytes;
+    patch.extend_from_slice(&build_void(padding));
+    if let Some(dst) = out.get_mut(seekhead_start..seekhead_start + SEEKHEAD_RESERVE) {
+        dst.copy_from_slice(&patch);
     }
 
     // Patch the Segment size now that we know the total.
@@ -587,4 +646,81 @@ fn write_master_element(out: &mut Vec<u8>, id: u32, children: &[u8]) {
     write_element_id(out, id);
     write_vint_size(out, children.len());
     out.extend_from_slice(children);
+}
+
+// ─── SeekHead / Cues Builders ───────────────────────────────────────────────
+
+/// Returns the raw EBML ID bytes for a given element ID (big-endian, with
+/// the VINT marker bit already embedded).
+fn element_id_bytes(id: u32) -> Vec<u8> {
+    let bytes = id.to_be_bytes();
+    if id >= 0x1000_0000 {
+        bytes.to_vec()
+    } else if id >= 0x0020_0000 {
+        bytes.get(1..).unwrap_or(&[]).to_vec()
+    } else if id >= 0x0000_4000 {
+        bytes.get(2..).unwrap_or(&[]).to_vec()
+    } else {
+        vec![bytes.get(3).copied().unwrap_or(0)]
+    }
+}
+
+/// Builds a complete SeekHead master element pointing to the given
+/// (element_id, segment_offset) pairs.
+fn build_seekhead(entries: &[(u32, usize)]) -> Vec<u8> {
+    let mut children = Vec::new();
+    for &(id, pos) in entries {
+        let mut seek_children = Vec::new();
+        write_binary_element(&mut seek_children, SEEK_ID_EL, &element_id_bytes(id));
+        write_uint_element(&mut seek_children, SEEK_POSITION, pos as u64);
+        write_master_element(&mut children, SEEK, &seek_children);
+    }
+    let mut buf = Vec::new();
+    write_master_element(&mut buf, SEEK_HEAD, &children);
+    buf
+}
+
+/// Builds the inner content of a Cues element from cluster entries.
+///
+/// Each entry is `(timestamp_ms, segment_offset)` for one Cluster.
+fn build_cues(entries: &[(u64, usize)]) -> Vec<u8> {
+    let mut children = Vec::new();
+    for &(ts, offset) in entries {
+        let mut ctp = Vec::new();
+        write_uint_element(&mut ctp, CUE_TRACK, 1);
+        write_uint_element(&mut ctp, CUE_CLUSTER_POSITION, offset as u64);
+
+        let mut cp = Vec::new();
+        write_uint_element(&mut cp, CUE_TIME, ts);
+        write_master_element(&mut cp, CUE_TRACK_POSITIONS, &ctp);
+
+        write_master_element(&mut children, CUE_POINT, &cp);
+    }
+    children
+}
+
+/// Builds a Void element of exactly `total_bytes`.
+///
+/// Used to reserve space for the SeekHead and to pad any leftover bytes
+/// after the SeekHead is patched in.
+fn build_void(total_bytes: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(total_bytes);
+    if total_bytes < 2 {
+        buf.resize(total_bytes, 0);
+        return buf;
+    }
+    buf.push(0xEC); // Void element ID
+    let data_len = total_bytes - 2;
+    if data_len <= 126 {
+        // 1-byte VINT: total = 1 (ID) + 1 (size) + data_len
+        write_vint_size(&mut buf, data_len);
+    } else {
+        // Force 2-byte VINT to avoid the 126/127 boundary mismatch.
+        // total = 1 (ID) + 2 (size) + (total_bytes - 3)
+        let data_len = total_bytes - 3;
+        buf.push(0x40 | ((data_len >> 8) as u8));
+        buf.push(data_len as u8);
+    }
+    buf.resize(total_bytes, 0);
+    buf
 }

@@ -105,6 +105,38 @@ fn mkv_contains_muxing_app_string() {
     );
 }
 
+// ── DocType versioning ───────────────────────────────────────────────────────
+
+/// V_UNCOMPRESSED is a Matroska v4 codec (RFC 9559).  DocTypeReadVersion must
+/// be 4 so that v2-only readers reject the file instead of encountering an
+/// unknown codec with no useful error.
+#[test]
+fn mkv_uncompressed_declares_doctype_v4() {
+    let frame = vec![0u8; 4 * 4 * 4];
+    let out = encode_mkv(&[&frame], 4, 4, 15, None, MkvVideoCodec::Uncompressed).unwrap();
+
+    // DocTypeReadVersion element: ID 0x42 0x85, size 0x81, value 0x04
+    let header = out.get(..80).unwrap_or(&out);
+    assert!(
+        header.windows(4).any(|w| w == [0x42, 0x85, 0x81, 0x04]),
+        "V_UNCOMPRESSED must declare DocTypeReadVersion = 4"
+    );
+}
+
+/// V_MS/VFW/FOURCC only needs Matroska v2; DocTypeReadVersion = 2 avoids
+/// rejecting older readers that can handle the file perfectly well.
+#[test]
+fn mkv_vfw_declares_doctype_v2() {
+    let frame = vec![0u8; 4 * 4 * 4];
+    let out = encode_mkv(&[&frame], 4, 4, 15, None, MkvVideoCodec::Vfw).unwrap();
+
+    let header = out.get(..80).unwrap_or(&out);
+    assert!(
+        header.windows(4).any(|w| w == [0x42, 0x85, 0x81, 0x02]),
+        "V_MS/VFW/FOURCC must declare DocTypeReadVersion = 2"
+    );
+}
+
 // ── V_UNCOMPRESSED codec ────────────────────────────────────────────────────
 
 /// Verify that `V_UNCOMPRESSED` mode embeds the correct codec ID and the
@@ -140,6 +172,26 @@ fn mkv_uncompressed_codec_id_and_fourcc() {
     assert!(
         !out.windows(15).any(|w| w == b"V_MS/VFW/FOURCC"),
         "V_MS/VFW/FOURCC must not appear in V_UNCOMPRESSED mode"
+    );
+}
+
+/// V_UNCOMPRESSED pixel format is declared by UncompressedFourCC + the Colour
+/// element's BitsPerChannel.  Without BitsPerChannel the bit depth is
+/// "unspecified" (default 0) and players have to guess.
+#[test]
+fn mkv_uncompressed_has_colour_bits_per_channel() {
+    let frame = vec![0u8; 4 * 4 * 4];
+    let out = encode_mkv(&[&frame], 4, 4, 15, None, MkvVideoCodec::Uncompressed).unwrap();
+
+    // Colour element ID: 0x55 0xB0
+    assert!(
+        out.windows(2).any(|w| w == [0x55, 0xB0]),
+        "V_UNCOMPRESSED must contain a Colour element"
+    );
+    // BitsPerChannel element: ID 0x55 0xB2, size 0x81, value 0x08
+    assert!(
+        out.windows(4).any(|w| w == [0x55, 0xB2, 0x81, 0x08]),
+        "Colour must declare BitsPerChannel = 8 for BGR24"
     );
 }
 
@@ -182,6 +234,86 @@ fn mkv_uncompressed_top_down_row_order() {
     assert!(
         out.windows(12).any(|w| w == expected_frame),
         "V_UNCOMPRESSED frame must be top-down (red row first, then blue)"
+    );
+}
+
+// ── Seeking support (SeekHead + Cues) ────────────────────────────────────────
+
+/// Verify the output contains SeekHead and Cues elements required for seeking.
+#[test]
+fn mkv_output_contains_seekhead_and_cues() {
+    let frame = vec![0u8; 4 * 4 * 4]; // 4×4 RGBA
+    let out = encode_mkv(&[&frame], 4, 4, 15, None, MkvVideoCodec::default()).unwrap();
+
+    // SeekHead ID: 0x11 0x4D 0x9B 0x74
+    assert!(
+        out.windows(4).any(|w| w == [0x11, 0x4D, 0x9B, 0x74]),
+        "output must contain SeekHead element for player seeking support"
+    );
+    // Cues ID: 0x1C 0x53 0xBB 0x6B
+    assert!(
+        out.windows(4).any(|w| w == [0x1C, 0x53, 0xBB, 0x6B]),
+        "output must contain Cues element for timeline seeking"
+    );
+}
+
+/// SeekHead must be the first non-Void child of the Segment, before Info and
+/// Tracks, so players discover the element directory without scanning.
+#[test]
+fn mkv_seekhead_precedes_info_and_tracks() {
+    let frame = vec![0u8; 4 * 4 * 4];
+    let out = encode_mkv(&[&frame], 4, 4, 15, None, MkvVideoCodec::default()).unwrap();
+
+    let seekhead_pos = out
+        .windows(4)
+        .position(|w| w == [0x11, 0x4D, 0x9B, 0x74])
+        .expect("SeekHead must be present");
+    let info_pos = out
+        .windows(4)
+        .position(|w| w == [0x15, 0x49, 0xA9, 0x66])
+        .expect("Info must be present");
+    let tracks_pos = out
+        .windows(4)
+        .position(|w| w == [0x16, 0x54, 0xAE, 0x6B])
+        .expect("Tracks must be present");
+
+    assert!(
+        seekhead_pos < info_pos,
+        "SeekHead ({seekhead_pos}) must precede Info ({info_pos})"
+    );
+    assert!(
+        seekhead_pos < tracks_pos,
+        "SeekHead ({seekhead_pos}) must precede Tracks ({tracks_pos})"
+    );
+}
+
+/// Verify that a multi-cluster file has more Cue data than a single-cluster
+/// file, confirming that each cluster gets its own CuePoint entry.
+#[test]
+fn mkv_cues_scale_with_cluster_count() {
+    let frame = vec![0u8; 4 * 4 * 4]; // 4×4 RGBA
+
+    // Single cluster (1 frame).
+    let out_single = encode_mkv(&[&frame], 4, 4, 15, None, MkvVideoCodec::default()).unwrap();
+
+    // Multiple clusters: at 15 fps with ~2 s cluster interval, 45 frames = 3 s
+    // → at least 2 clusters (0–2 s, 2–3 s).
+    let frames: Vec<&[u8]> = vec![frame.as_slice(); 45];
+    let out_multi = encode_mkv(&frames, 4, 4, 15, None, MkvVideoCodec::default()).unwrap();
+
+    let cues_size = |data: &[u8]| -> usize {
+        let pos = data
+            .windows(4)
+            .position(|w| w == [0x1C, 0x53, 0xBB, 0x6B])
+            .expect("Cues must be present");
+        data.len() - pos
+    };
+
+    let single_sz = cues_size(&out_single);
+    let multi_sz = cues_size(&out_multi);
+    assert!(
+        multi_sz > single_sz,
+        "multi-cluster Cues ({multi_sz} B) must be larger than single-cluster ({single_sz} B)"
     );
 }
 
