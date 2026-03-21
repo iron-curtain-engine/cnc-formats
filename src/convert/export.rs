@@ -12,7 +12,7 @@ use crate::tmp::{RaTmpFile, TdTmpFile};
 use crate::wsa::WsaFile;
 
 use super::{encode_png, indexed_to_rgba};
-use std::io::{Cursor, Read, Seek, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
 // ─── SHP → PNG ───────────────────────────────────────────────────────────────
 
@@ -87,46 +87,124 @@ pub fn aud_reader_to_wav<R: Read, W: Write + Seek>(reader: R, writer: W) -> Resu
 }
 
 /// Converts a streaming AUD decoder into WAV written to `writer`.
+///
+/// Writes the RIFF WAV header, streams decoded PCM in bulk, then patches
+/// the RIFF and data chunk sizes.  All sample data is written via
+/// `write_all` on 8 KB byte slices instead of per-sample calls, which is
+/// orders of magnitude faster for long files.
 pub fn aud_stream_to_wav<R: Read, W: Write + Seek>(
     stream: &mut AudStream<R>,
-    writer: W,
+    mut writer: W,
 ) -> Result<(), Error> {
     let header = stream.header();
     let channels = if header.is_stereo() { 2u16 } else { 1u16 };
     let sample_rate = header.sample_rate as u32;
-    let spec = hound::WavSpec {
-        channels,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
+    let block_align = channels.saturating_mul(2); // 16-bit = 2 bytes/sample
+    let byte_rate = sample_rate.saturating_mul(block_align as u32);
 
-    let mut wav_writer =
-        hound::WavWriter::new(writer, spec).map_err(|_| Error::DecompressionError {
-            reason: "WAV writer initialization failed",
-        })?;
+    // Write RIFF WAV header (44 bytes) with placeholder sizes.
+    writer
+        .write_all(b"RIFF")
+        .map_err(|_| wav_io_error("RIFF tag"))?;
+    let riff_size_pos = writer
+        .stream_position()
+        .map_err(|_| wav_io_error("RIFF size position"))?;
+    writer
+        .write_all(&0u32.to_le_bytes())
+        .map_err(|_| wav_io_error("RIFF size placeholder"))?;
+    writer
+        .write_all(b"WAVE")
+        .map_err(|_| wav_io_error("WAVE tag"))?;
+
+    // fmt chunk (16 bytes payload).
+    writer
+        .write_all(b"fmt ")
+        .map_err(|_| wav_io_error("fmt tag"))?;
+    writer
+        .write_all(&16u32.to_le_bytes())
+        .map_err(|_| wav_io_error("fmt size"))?;
+    writer
+        .write_all(&1u16.to_le_bytes())
+        .map_err(|_| wav_io_error("format tag"))?; // PCM
+    writer
+        .write_all(&channels.to_le_bytes())
+        .map_err(|_| wav_io_error("channels"))?;
+    writer
+        .write_all(&sample_rate.to_le_bytes())
+        .map_err(|_| wav_io_error("sample rate"))?;
+    writer
+        .write_all(&byte_rate.to_le_bytes())
+        .map_err(|_| wav_io_error("byte rate"))?;
+    writer
+        .write_all(&block_align.to_le_bytes())
+        .map_err(|_| wav_io_error("block align"))?;
+    writer
+        .write_all(&16u16.to_le_bytes())
+        .map_err(|_| wav_io_error("bits per sample"))?;
+
+    // data chunk header with placeholder size.
+    writer
+        .write_all(b"data")
+        .map_err(|_| wav_io_error("data tag"))?;
+    let data_size_pos = writer
+        .stream_position()
+        .map_err(|_| wav_io_error("data size position"))?;
+    writer
+        .write_all(&0u32.to_le_bytes())
+        .map_err(|_| wav_io_error("data size placeholder"))?;
+
+    // Decode and write PCM in bulk chunks.
     let mut samples = [0i16; 4096];
+    let mut data_bytes_written = 0u64;
 
     loop {
         let read = stream.read_samples(&mut samples)?;
         if read == 0 {
             break;
         }
-        for sample in samples.get(..read).unwrap_or(&[]) {
-            wav_writer
-                .write_sample(*sample)
-                .map_err(|_| Error::DecompressionError {
-                    reason: "WAV writer failed to write sample",
-                })?;
+        // Convert i16 samples to LE bytes in a stack buffer, then write once.
+        let sample_slice = samples.get(..read).unwrap_or(&[]);
+        let mut byte_buf = [0u8; 4096 * 2];
+        for (i, &s) in sample_slice.iter().enumerate() {
+            let le = s.to_le_bytes();
+            let base = i.saturating_mul(2);
+            if let Some(dst) = byte_buf.get_mut(base..base.saturating_add(2)) {
+                dst.copy_from_slice(&le);
+            }
         }
+        let chunk = byte_buf
+            .get(..read.saturating_mul(2))
+            .unwrap_or(&byte_buf);
+        writer
+            .write_all(chunk)
+            .map_err(|_| wav_io_error("PCM data"))?;
+        data_bytes_written = data_bytes_written.saturating_add(chunk.len() as u64);
     }
 
-    wav_writer
-        .finalize()
-        .map_err(|_| Error::DecompressionError {
-            reason: "WAV writer finalization failed",
-        })?;
+    // Patch RIFF size and data chunk size.
+    let data_size = data_bytes_written as u32;
+    let riff_size = data_size.saturating_add(36); // 44 - 8 = 36 bytes of header after RIFF size
+
+    writer
+        .seek(SeekFrom::Start(data_size_pos))
+        .map_err(|_| wav_io_error("seek to data size"))?;
+    writer
+        .write_all(&data_size.to_le_bytes())
+        .map_err(|_| wav_io_error("patch data size"))?;
+
+    writer
+        .seek(SeekFrom::Start(riff_size_pos))
+        .map_err(|_| wav_io_error("seek to RIFF size"))?;
+    writer
+        .write_all(&riff_size.to_le_bytes())
+        .map_err(|_| wav_io_error("patch RIFF size"))?;
+
     Ok(())
+}
+
+/// Shorthand for a WAV I/O write error.
+fn wav_io_error(context: &'static str) -> Error {
+    Error::DecompressionError { reason: context }
 }
 
 // ─── TMP → PNG ───────────────────────────────────────────────────────────────
