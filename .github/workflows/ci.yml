@@ -77,7 +77,9 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - run: cargo check --target ${{ matrix.target }} --no-default-features
-      - run: cargo check --target ${{ matrix.target }} --all-features
+        # cli (strict-path → soft-canonicalize) is intentionally excluded: it
+        # pulls in filesystem helpers that have no WASM/mobile implementation.
+      - run: cargo check --target ${{ matrix.target }} --no-default-features --features encrypted-mix,convert,miniyaml,midi,adl,xmi,transcribe,meg
 
   msrv:
     name: MSRV (1.86)
