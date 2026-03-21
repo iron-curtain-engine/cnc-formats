@@ -181,7 +181,7 @@ All parsing logic is written from publicly available format documentation
 and binary analysis. This is what allows the MIT/Apache-2.0 licensing.
 
 For EA GPL-derived parsing (e.g., game-specific rule interpretation),
-see the `ra-formats` crate in the [Iron Curtain engine](https://github.com/iron-curtain-engine/iron-curtain).
+see the `ic-cnc-content` crate in the [Iron Curtain engine](https://github.com/iron-curtain-engine/iron-curtain).
 
 ### Key properties
 

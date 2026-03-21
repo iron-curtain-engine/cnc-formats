@@ -28,7 +28,7 @@ derived from Electronic Arts' GPL-licensed C&C source code releases.
 
 - Copy or adapt code from the EA GPL source releases (including struct
   definitions, lookup tables, and compression algorithms)
-- Copy code from the `ra-formats` crate in the Iron Curtain engine (which is
+- Copy code from the `ic-cnc-content` crate in the Iron Curtain engine (which is
   GPL v3)
 - Copy code from any GPL-licensed C&C community tool without verifying the
   license is compatible

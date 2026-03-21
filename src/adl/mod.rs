@@ -44,7 +44,7 @@
 //! ## Rendering
 //!
 //! ADL→WAV rendering requires OPL2 chip emulation.  The only viable pure
-//! Rust emulator (`opl-emu`) is GPL-3.0, so rendering lives in `ra-formats`,
+//! Rust emulator (`opl-emu`) is GPL-3.0, so rendering lives in `ic-cnc-content`,
 //! not here.  This module provides the parser only.
 //!
 //! ## References
