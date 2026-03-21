@@ -389,8 +389,9 @@ pub fn vqa_to_avi(vqa: &crate::vqa::VqaFile<'_>) -> Result<Vec<u8>, Error> {
 /// Converts a VQA video file to a Matroska (MKV) container.
 ///
 /// Decodes all VQA frames and extracts audio, then muxes them into an MKV
-/// container with `V_UNCOMPRESSED` BGR24 video and `A_PCM/INT/LIT` audio.
-/// The result plays in VLC, ffplay, mpv, etc.
+/// container with BGR24 video and `A_PCM/INT/LIT` audio.  The `video_codec`
+/// parameter selects between `V_UNCOMPRESSED` (modern, RFC 9559) and
+/// `V_MS/VFW/FOURCC` (legacy, broad player compatibility).
 ///
 /// Returns the complete MKV file as `Vec<u8>`.
 ///
@@ -398,7 +399,10 @@ pub fn vqa_to_avi(vqa: &crate::vqa::VqaFile<'_>) -> Result<Vec<u8>, Error> {
 ///
 /// - [`Error::DecompressionError`] if VQA frame decoding fails.
 /// - [`Error::InvalidSize`] if no frames are produced.
-pub fn vqa_to_mkv(vqa: &crate::vqa::VqaFile<'_>) -> Result<Vec<u8>, Error> {
+pub fn vqa_to_mkv(
+    vqa: &crate::vqa::VqaFile<'_>,
+    video_codec: super::mkv::MkvVideoCodec,
+) -> Result<Vec<u8>, Error> {
     let decoded_frames = vqa.decode_frames()?;
     if decoded_frames.is_empty() {
         return Err(Error::DecompressionError {
@@ -437,24 +441,20 @@ pub fn vqa_to_mkv(vqa: &crate::vqa::VqaFile<'_>) -> Result<Vec<u8>, Error> {
     }
 
     // Extract audio (if present).
-    let audio = vqa.extract_audio()?;
-    let (audio_ref, sample_rate, channels) = match &audio {
-        Some(a) => (
-            Some(a.samples.as_slice()),
-            a.sample_rate as u32,
-            a.channels as u16,
-        ),
-        None => (None, 0, 0),
-    };
+    let extracted = vqa.extract_audio()?;
+    let mkv_audio = extracted.as_ref().map(|a| super::mkv::MkvAudio {
+        samples: a.samples.as_slice(),
+        sample_rate: a.sample_rate as u32,
+        channels: a.channels as u16,
+    });
 
     super::mkv::encode_mkv(
         &rgba_frames,
         width,
         height,
         fps,
-        audio_ref,
-        sample_rate,
-        channels,
+        mkv_audio.as_ref(),
+        video_codec,
     )
 }
 

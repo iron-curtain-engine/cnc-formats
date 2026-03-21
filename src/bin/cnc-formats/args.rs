@@ -145,7 +145,7 @@ CONVERSION MATRIX:\n\
   PAL  → png         no               256-color swatch image\n\
   AUD  → wav         no\n\
   VQA  → avi         no               includes audio track\n\
-  VQA  → mkv         no               V_UNCOMPRESSED + PCM in Matroska\n\
+  VQA  → mkv         no               BGR24 + PCM in Matroska (see --mkv-codec)\n\
   ────────────────────────────────────────────────────\n\
   png  → shp         YES              multi-frame: reads numbered files\n\
   gif  → shp         YES              reads animation frames\n\
@@ -207,6 +207,15 @@ IMPORTANT:\n\
         #[cfg(any(feature = "convert", feature = "miniyaml"))]
         #[arg(long, short)]
         output: Option<String>,
+        /// Video codec for MKV output (VQA → MKV only).
+        ///
+        /// `uncompressed` (default): V_UNCOMPRESSED — native Matroska
+        /// uncompressed video per RFC 9559.  Modern players (ffplay, mpv).
+        /// `vfw`: V_MS/VFW/FOURCC — legacy Video for Windows mapping.
+        /// Maximum compatibility (VLC 3.x, Windows Media Player, etc.).
+        #[cfg(feature = "convert")]
+        #[arg(long, value_enum, default_value_t = CliMkvCodec::Uncompressed)]
+        mkv_codec: CliMkvCodec,
     },
     /// List archive entries with CRC, size, and resolved filenames.
     ///
@@ -429,4 +438,14 @@ pub(crate) enum ConvertTarget {
     /// Standard YAML (for MiniYAML sources).
     #[cfg(feature = "miniyaml")]
     Yaml,
+}
+
+/// MKV video codec selection for the CLI `--mkv-codec` flag.
+#[cfg(feature = "convert")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum CliMkvCodec {
+    /// V_UNCOMPRESSED — native Matroska uncompressed video (RFC 9559).
+    Uncompressed,
+    /// V_MS/VFW/FOURCC — legacy VFW mapping for broad player compatibility.
+    Vfw,
 }

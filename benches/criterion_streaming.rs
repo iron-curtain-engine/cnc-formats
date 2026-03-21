@@ -298,7 +298,13 @@ fn bench_export(c: &mut Criterion) {
     });
 
     group.bench_function("vqa_to_mkv", |b| {
-        b.iter(|| black_box(convert::vqa_to_mkv(&vqa_file).unwrap().len()))
+        b.iter(|| {
+            black_box(
+                convert::vqa_to_mkv(&vqa_file, convert::MkvVideoCodec::default())
+                    .unwrap()
+                    .len(),
+            )
+        })
     });
 
     group.throughput(Throughput::Bytes(pal_bytes.len() as u64));

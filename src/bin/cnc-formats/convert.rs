@@ -13,6 +13,8 @@ mod import;
 
 #[cfg(feature = "convert")]
 use super::read_file;
+#[cfg(feature = "convert")]
+use super::CliMkvCodec;
 use super::{ConvertTarget, Format};
 #[cfg(feature = "convert")]
 use std::process;
@@ -27,6 +29,7 @@ pub(crate) fn cmd_convert(
     explicit_format: Option<Format>,
     #[cfg(feature = "convert")] palette_path: Option<&str>,
     output_path: Option<&str>,
+    #[cfg(feature = "convert")] mkv_codec: CliMkvCodec,
 ) -> i32 {
     match to {
         #[cfg(feature = "miniyaml")]
@@ -54,7 +57,7 @@ pub(crate) fn cmd_convert(
         #[cfg(feature = "convert")]
         ConvertTarget::Avi => import::convert_to_avi(path, output_path),
         #[cfg(feature = "convert")]
-        ConvertTarget::Mkv => import::convert_to_mkv(path, output_path),
+        ConvertTarget::Mkv => import::convert_to_mkv(path, output_path, mkv_codec),
         #[cfg(feature = "convert")]
         ConvertTarget::Vqa => import::convert_to_vqa(path, palette_path, output_path),
     }

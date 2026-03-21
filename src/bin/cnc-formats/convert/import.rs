@@ -158,15 +158,24 @@ pub(super) fn convert_to_avi(path: &str, output: Option<&str>) -> i32 {
 
 /// Convert VQA to MKV video (Matroska container).
 #[cfg(feature = "convert")]
-pub(super) fn convert_to_mkv(path: &str, output: Option<&str>) -> i32 {
+pub(super) fn convert_to_mkv(
+    path: &str,
+    output: Option<&str>,
+    mkv_codec: crate::CliMkvCodec,
+) -> i32 {
     let data = read_file(path);
+    // Map CLI enum to library enum.
+    let video_codec = match mkv_codec {
+        crate::CliMkvCodec::Uncompressed => cnc_formats::convert::MkvVideoCodec::Uncompressed,
+        crate::CliMkvCodec::Vfw => cnc_formats::convert::MkvVideoCodec::Vfw,
+    };
     match cnc_formats::vqa::VqaFile::parse(&data) {
         Ok(vqa) => {
             eprintln!(
                 "Converting VQA → MKV ({} frames, {}×{}, {} fps)...",
                 vqa.header.num_frames, vqa.header.width, vqa.header.height, vqa.header.fps
             );
-            match cnc_formats::convert::vqa_to_mkv(&vqa) {
+            match cnc_formats::convert::vqa_to_mkv(&vqa, video_codec) {
                 Ok(mkv_data) => {
                     let out = output
                         .map(String::from)

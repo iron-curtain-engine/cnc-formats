@@ -45,6 +45,8 @@ mod convert;
 use clap::Parser;
 use std::process;
 
+#[cfg(feature = "convert")]
+pub(crate) use args::CliMkvCodec;
 #[cfg(any(feature = "convert", feature = "miniyaml"))]
 pub(crate) use args::ConvertTarget;
 pub(crate) use args::{Cli, Command, Format, MixAccessMode};
@@ -73,6 +75,8 @@ fn main() {
             #[cfg(feature = "convert")]
             palette,
             output,
+            #[cfg(feature = "convert")]
+            mkv_codec,
         } => convert::cmd_convert(
             &file,
             to,
@@ -80,6 +84,8 @@ fn main() {
             #[cfg(feature = "convert")]
             palette.as_deref(),
             output.as_deref(),
+            #[cfg(feature = "convert")]
+            mkv_codec,
         ),
         Command::List {
             file,
