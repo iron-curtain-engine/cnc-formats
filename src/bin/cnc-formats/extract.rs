@@ -36,9 +36,9 @@ use self::paths::{
     generated_flat_output_path, make_output_name_unique, make_stored_name_unique,
     resolve_output_name, validate_candidate_path,
 };
-use self::stored::extract_big;
 #[cfg(feature = "meg")]
 use self::stored::extract_meg;
+use self::stored::{extract_big, extract_pak};
 use cnc_formats::mix::MixCrc;
 use strict_path::{PathBoundary, StrictPath};
 
@@ -90,6 +90,10 @@ pub(crate) fn cmd_extract(
             }
             let file = open_file(path);
             extract_big(file, &out_dir, filter)
+        }
+        Format::Pak => {
+            let data = read_file(path);
+            extract_pak(&data, &out_dir, filter)
         }
         #[cfg(feature = "meg")]
         Format::Meg => {
@@ -178,7 +182,7 @@ fn extract_mix_with_policy(
 
 /// Returns `true` if the format is an archive type that `extract` can handle.
 fn is_archive_format(fmt: &Format) -> bool {
-    if matches!(fmt, Format::Big) {
+    if matches!(fmt, Format::Big | Format::Pak) {
         return true;
     }
     #[cfg(feature = "meg")]

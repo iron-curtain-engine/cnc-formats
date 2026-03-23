@@ -1,6 +1,21 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025–present Iron Curtain contributors
 
+//! Shared helpers used by all `cncf` subcommands.
+//!
+//! Provides:
+//! - **I/O**: [`read_file`], [`open_file`] — read bytes or open a file handle,
+//!   exiting with a diagnostic on failure.
+//! - **Format detection**: [`resolve_format`] — resolves an explicit `--format`
+//!   flag or falls back to extension-based auto-detection.
+//! - **Error reporting**: [`print_format_hint`], [`report_parse_error`],
+//!   [`report_convert_error`] — consistent diagnostic messages.
+//! - **MIX name maps**: [`load_name_map`], [`build_mix_name_map_reader`],
+//!   [`build_mix_name_map_archive`] — CRC→filename resolution for `list`
+//!   and `extract`.
+//! - **Shared subcommands**: [`cmd_identify`], [`cmd_validate`] — the
+//!   `identify` and `validate` implementations used from `main.rs`.
+
 use super::Format;
 use std::collections::HashMap;
 use std::io::{Read, Seek};
@@ -82,11 +97,11 @@ pub(crate) fn report_convert_error(path: &str, e: &cnc_formats::Error) {
 pub(crate) fn supported_archive_list() -> String {
     #[cfg(feature = "meg")]
     {
-        ["mix", "big", "meg", "pgm"].join(", ")
+        ["mix", "big", "pak", "bag-idx", "meg", "pgm"].join(", ")
     }
     #[cfg(not(feature = "meg"))]
     {
-        "mix, big".to_string()
+        "mix, big, pak, bag-idx".to_string()
     }
 }
 
@@ -224,6 +239,18 @@ fn detect_format(path: &str) -> Option<Format> {
         "adl" => Some(Format::Adl),
         #[cfg(feature = "xmi")]
         "xmi" => Some(Format::Xmi),
+        "voc" => Some(Format::Voc),
+        "pak" => Some(Format::Pak),
+        "icn" => Some(Format::Icn),
+        "bin" => Some(Format::BinTd),
+        "mpr" => Some(Format::Mpr),
+        "bag" | "idx" => Some(Format::BagIdx),
+        "wnd" => Some(Format::Wnd),
+        "str" => Some(Format::SageStr),
+        "apt" => Some(Format::Apt),
+        "dds" => Some(Format::Dds),
+        "tga" => Some(Format::Tga),
+        // JPG/JPEG: detected by sniff (identify command) but no parser module — not mapped here.
         #[cfg(feature = "meg")]
         "meg" | "pgm" => Some(Format::Meg),
         _ => None,
@@ -254,6 +281,21 @@ fn format_name(fmt: &Format) -> &'static str {
         Format::Cps => "cps",
         Format::W3d => "w3d",
         Format::TmpTs => "tmp-ts",
+        Format::Voc => "voc",
+        Format::Pak => "pak",
+        Format::ShpD2 => "shp-d2",
+        Format::Icn => "icn",
+        Format::D2Map => "d2-map",
+        Format::BinTd => "bin-td",
+        Format::Mpr => "mpr",
+        Format::BagIdx => "bag-idx",
+        Format::MapRa2 => "map-ra2",
+        Format::Wnd => "wnd",
+        Format::SageStr => "sage-str",
+        Format::MapSage => "map-sage",
+        Format::Apt => "apt",
+        Format::Dds => "dds",
+        Format::Tga => "tga",
         #[cfg(feature = "convert")]
         Format::Avi => "avi",
         #[cfg(feature = "miniyaml")]
@@ -342,6 +384,51 @@ fn validate_data(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> {
         }
         Format::TmpTs => {
             cnc_formats::tmp::TsTmpFile::parse(data)?;
+        }
+        Format::Voc => {
+            cnc_formats::voc::VocFile::parse(data)?;
+        }
+        Format::Pak => {
+            cnc_formats::pak::PakArchive::parse(data)?;
+        }
+        Format::ShpD2 => {
+            cnc_formats::shp_d2::ShpD2File::parse(data)?;
+        }
+        Format::Icn => {
+            cnc_formats::icn::IcnFile::parse(data, 16, 16)?;
+        }
+        Format::D2Map => {
+            cnc_formats::d2_map::D2Scenario::parse(data)?;
+        }
+        Format::BinTd => {
+            cnc_formats::bin_td::BinMap::parse(data, 64, 64)?;
+        }
+        Format::Mpr => {
+            cnc_formats::mpr::MprFile::parse(data)?;
+        }
+        Format::BagIdx => {
+            cnc_formats::bag_idx::IdxFile::parse(data)?;
+        }
+        Format::MapRa2 => {
+            cnc_formats::map_ra2::MapRa2File::parse(data)?;
+        }
+        Format::Wnd => {
+            cnc_formats::wnd::WndFile::parse(data)?;
+        }
+        Format::SageStr => {
+            cnc_formats::sage_str::StrFile::parse(data)?;
+        }
+        Format::MapSage => {
+            cnc_formats::map_sage::MapSageFile::parse(data)?;
+        }
+        Format::Apt => {
+            cnc_formats::apt::AptFile::parse(data)?;
+        }
+        Format::Dds => {
+            cnc_formats::dds::DdsFile::parse(data)?;
+        }
+        Format::Tga => {
+            cnc_formats::tga::TgaFile::parse(data)?;
         }
         #[cfg(feature = "miniyaml")]
         Format::Miniyaml => {

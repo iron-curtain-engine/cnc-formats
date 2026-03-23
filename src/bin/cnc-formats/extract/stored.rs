@@ -111,6 +111,94 @@ pub(super) fn extract_big<R: std::io::Read + std::io::Seek>(
     0
 }
 
+/// Parse a Dune II PAK archive and extract matching entries to `out_dir`.
+pub(super) fn extract_pak(data: &[u8], out_dir: &Path, filter: Option<&str>) -> i32 {
+    let archive = match cnc_formats::pak::PakArchive::parse(data) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+
+    let out_boundary: PathBoundary = match PathBoundary::try_new_create(out_dir) {
+        Ok(boundary) => boundary,
+        Err(e) => {
+            eprintln!(
+                "Error creating extraction boundary {}: {e}",
+                out_dir.display()
+            );
+            return 1;
+        }
+    };
+
+    let entries = archive.entries();
+    let filter_lower = filter.map(|f| f.to_ascii_lowercase());
+
+    eprintln!(
+        "Extracting from PAK archive ({} entries) to {}",
+        entries.len(),
+        out_dir.display()
+    );
+
+    let mut extracted = 0u64;
+    let mut bytes_total = 0u64;
+    let mut used_names = HashSet::new();
+
+    for (i, entry) in entries.iter().enumerate() {
+        if let Some(ref fl) = filter_lower {
+            if !entry.name.to_ascii_lowercase().contains(fl.as_str()) {
+                continue;
+            }
+        }
+
+        let (relative_name, collision_warning) =
+            make_stored_name_unique(&entry.name, &mut used_names);
+        if let Some(message) = collision_warning {
+            eprintln!("  Warning: {message}");
+        }
+
+        let out_path = match validate_candidate_path(&out_boundary, &relative_name) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "  Warning: refusing unsafe path \"{}\": {e}, skipping",
+                    entry.name
+                );
+                continue;
+            }
+        };
+
+        let entry_data = match archive.get_by_index(i) {
+            Some(d) => d,
+            None => {
+                eprintln!("  Warning: could not read \"{}\", skipping", entry.name);
+                continue;
+            }
+        };
+
+        let mut out_file = match create_strict_output_file(&out_path) {
+            Ok(file) => file,
+            Err(e) => {
+                eprintln!("  Error writing {}: {e}", out_path.strictpath_display());
+                return 1;
+            }
+        };
+
+        if let Err(e) = out_file.write_all(entry_data) {
+            eprintln!("  Error writing {}: {e}", out_path.strictpath_display());
+            return 1;
+        }
+
+        eprintln!("  {} ({} bytes)", relative_name, entry.size);
+        extracted = extracted.saturating_add(1);
+        bytes_total = bytes_total.saturating_add(entry.size as u64);
+    }
+
+    eprintln!("\nExtracted {extracted} files ({bytes_total} bytes total)");
+    0
+}
+
 /// Parse a MEG archive and extract matching entries to `out_dir`.
 ///
 /// MEG archives store filenames directly, so no `--names` file is needed.

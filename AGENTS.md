@@ -502,6 +502,41 @@ error.
 
 ## Coding Principles
 
+### Module Documentation
+
+Every source file must open with a `//!` (inner) doc comment.  The comment
+must state, at minimum:
+
+- **What** the file provides: formats handled, subcommand implemented, or
+  helpers exposed.
+- **Why** the file exists as a separate file when it is a split-off auxiliary
+  (e.g. a file that exists only to keep another file under the 600-line cap).
+- **How** the format or algorithm works at a high level: file layout (for
+  binary formats), parsing strategy, or key invariants.
+
+**Specific requirements by file type:**
+
+1. **Format `mod.rs` files** must include:
+   - One-line summary naming the format and file extension.
+   - `## File Layout` section with an ASCII diagram of the binary structure.
+   - `## References` line crediting the documentation source (community docs,
+     MSDN, spec name, etc.).
+
+2. **`src/bin/` files** must include a `//!` block summarizing what the file
+   provides or which subcommand it implements.  A file with no doc comment
+   is non-compliant regardless of how self-explanatory its name seems.
+
+3. **Auxiliary / split files** (files whose primary purpose is keeping another
+   file under the 600-line cap) must enumerate the items they contain — not
+   just explain why they were split.  An LLM searching for "inspect DDS" must
+   be able to identify the right file from its `//!` comment alone without
+   reading the entire file.
+
+4. **Constants** must each carry a `///` doc comment.  One-liners are fine;
+   the key requirement is that the purpose — and, for safety caps, the
+   rationale — is stated in the comment and not left to be inferred from the
+   name alone.
+
 ### Error Design
 
 - Use a **single shared `Error` enum** in `src/error.rs` for all modules.
@@ -571,6 +606,24 @@ prevent integer overflow on offset arithmetic.
 Even though `str::find()` returns valid UTF-8-aligned indices, the rule
 is absolute — no reviewer should ever need to *reason* about whether an
 index is safe.  If it compiles without `.get()`, it's wrong.
+
+**Prior bounds checks do not exempt direct indexing.**  A manual check
+immediately before the access — `if end > data.len() { return Err(…) }` or
+a `while i < slice.len()` loop guard — does **not** satisfy this rule.  The
+replacement must be at the call site:
+
+```rust
+// Wrong — reader must trace the preceding guard to verify safety:
+if end > data.len() { return Err(…); }
+let slice = &data[offset..end];
+
+// Correct — safety is self-evident at the call site:
+let slice = data.get(offset..end).ok_or(Error::UnexpectedEof { … })?;
+```
+
+**Scope: all production code.**  The rule applies to every production file —
+library parsers under `src/<format>/`, CLI binary modules under `src/bin/`,
+and shared helpers.  There is no exception for code that "isn't a parser".
 
 **Test code** (`#[cfg(test)]` blocks) may use direct indexing when the test
 controls the input and panic-on-bug is acceptable.

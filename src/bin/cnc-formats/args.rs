@@ -5,8 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 /// CLI tool for working with classic Command & Conquer game assets.
 ///
-/// Supports MIX, BIG, SHP, PAL, AUD, LUT, TMP, VQA, VQP, WSA, FNT, DIP, ENG,
-/// INI, and MiniYAML.
+/// Supports all classic C&C formats from Dune II through Generals.
 /// Auto-detects format from file extension; use --format to override.
 #[derive(Parser)]
 #[command(
@@ -17,8 +16,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 CLI tool for working with classic Command & Conquer game assets.\n\
 \n\
 SUPPORTED FORMATS:\n\
-  Auto-detected: .mix .big .shp .pal .aud .lut .vqa .vqp .wsa .fnt .dip .eng .ger .fre .ini .vxl .hva .csf .cps .w3d .miniyaml .meg .pgm .mid .adl .xmi .avi\n\
-  Ambiguous:     .tmp — MUST use --format tmp (TD), --format tmp-ra (RA), or --format tmp-ts (TS/RA2)\n\
+  Auto-detected: .mix .big .shp .pal .aud .lut .vqa .vqp .wsa .fnt .dip .eng .ger .fre .ini\n\
+                   .vxl .hva .csf .cps .w3d .voc .pak .icn .bin .mpr .bag .idx .wnd .str .apt\n\
+                   .dds .tga .jpg .jpeg .miniyaml .meg .pgm .mid .adl .xmi .avi\n\
+  Ambiguous:     .tmp — use --format tmp (TD), --format tmp-ra (RA), or --format tmp-ts (TS/RA2)\n\
+                   .shp — TD/RA1 by default; use --format shp-d2 (Dune II) or --format shp-ts (TS/RA2)\n\
+                   .map — use --format map-ra2 (RA2) or --format map-sage (Generals)\n\
   Not detected:  .yaml .yml — use --format miniyaml if the file is MiniYAML\n\
 \n\
 EXIT CODES:\n\
@@ -375,6 +378,36 @@ pub(crate) enum Format {
     Cps,
     W3d,
     TmpTs,
+    /// Creative Voice File audio (Dune II).
+    Voc,
+    /// Dune II PAK archive.
+    Pak,
+    /// Dune II SHP sprites (Format80/LCW).
+    ShpD2,
+    /// Dune II icon/tile graphics (.icn).
+    Icn,
+    /// Dune II scenario/mission.
+    D2Map,
+    /// TD/RA1 terrain grid (.bin).
+    BinTd,
+    /// TD/RA1 map package (.mpr).
+    Mpr,
+    /// RA2 audio archive (.bag + .idx).
+    BagIdx,
+    /// RA2 map file (.map, INI-based).
+    MapRa2,
+    /// Generals UI layout (.wnd).
+    Wnd,
+    /// Generals SAGE string table (.str).
+    SageStr,
+    /// Generals binary map (.map, SAGE).
+    MapSage,
+    /// Generals GUI animation (.apt).
+    Apt,
+    /// DirectDraw Surface texture (.dds).
+    Dds,
+    /// Truevision TGA image (.tga).
+    Tga,
     #[cfg(feature = "convert")]
     Avi,
     #[cfg(feature = "miniyaml")]

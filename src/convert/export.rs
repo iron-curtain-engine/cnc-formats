@@ -172,9 +172,7 @@ pub fn aud_stream_to_wav<R: Read, W: Write + Seek>(
                 dst.copy_from_slice(&le);
             }
         }
-        let chunk = byte_buf
-            .get(..read.saturating_mul(2))
-            .unwrap_or(&byte_buf);
+        let chunk = byte_buf.get(..read.saturating_mul(2)).unwrap_or(&byte_buf);
         writer
             .write_all(chunk)
             .map_err(|_| wav_io_error("PCM data"))?;

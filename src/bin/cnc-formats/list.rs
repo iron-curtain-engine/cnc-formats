@@ -49,6 +49,14 @@ pub(crate) fn cmd_list(
             let file = open_file(path);
             list_big(file)
         }
+        Format::Pak => {
+            let data = read_file(path);
+            list_pak(&data)
+        }
+        Format::BagIdx => {
+            let data = read_file(path);
+            list_bag_idx(&data)
+        }
         #[cfg(feature = "meg")]
         Format::Meg => {
             if mix_access != MixAccessMode::Stream {
@@ -124,7 +132,7 @@ fn list_mix_with_policy(path: &str, mix_access: MixAccessMode, names: Option<&st
 
 /// Returns `true` if the format is an archive type that `list` can handle.
 fn is_archive_format(fmt: &Format) -> bool {
-    if matches!(fmt, Format::Big) {
+    if matches!(fmt, Format::Big | Format::Pak | Format::BagIdx) {
         return true;
     }
     #[cfg(feature = "meg")]
@@ -235,6 +243,66 @@ fn list_meg<R: std::io::Read + std::io::Seek>(file: R) -> i32 {
 
     // ── Summary ──────────────────────────────────────────────────────────
     let total_size: u64 = entries.iter().map(|e| e.size).sum();
+    println!("\n{} entries, {} bytes total", entries.len(), total_size);
+
+    0
+}
+
+// ── PAK listing ─────────────────────────────────────────────────────────────
+
+/// Parse a Dune II PAK archive and print a per-entry table to stdout.
+fn list_pak(data: &[u8]) -> i32 {
+    let archive = match cnc_formats::pak::PakArchive::parse(data) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+
+    let entries = archive.entries();
+
+    println!("Name                                      Size");
+    println!("────────────────────────────────────  ──────────");
+
+    for entry in entries {
+        println!("{:<36}  {:>10}", entry.name, entry.size);
+    }
+
+    let total_size: usize = entries.iter().map(|e| e.size).sum();
+    println!("\n{} entries, {} bytes total", entries.len(), total_size);
+
+    0
+}
+
+// ── BAG/IDX listing ─────────────────────────────────────────────────────────
+
+/// Parse an RA2 IDX file and print a per-entry table to stdout.
+fn list_bag_idx(data: &[u8]) -> i32 {
+    let idx = match cnc_formats::bag_idx::IdxFile::parse(data) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+
+    let entries = idx.entries();
+
+    println!(
+        "{:<20}  {:>10}  {:>10}  {:>6}",
+        "Name", "Offset", "Size", "Rate"
+    );
+    println!("────────────────────  ──────────  ──────────  ──────");
+
+    for entry in entries {
+        println!(
+            "{:<20}  {:>10}  {:>10}  {:>6}",
+            entry.name, entry.offset, entry.size, entry.sample_rate
+        );
+    }
+
+    let total_size: u64 = entries.iter().map(|e| u64::from(e.size)).sum();
     println!("\n{} entries, {} bytes total", entries.len(), total_size);
 
     0

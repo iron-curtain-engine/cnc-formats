@@ -21,7 +21,7 @@
 //! Format source: XCC Utilities, CnC-Tools documentation, ModEnc wiki.
 
 use crate::error::Error;
-use crate::read::{read_u16_le, read_u8};
+use crate::read::{read_u16_le, read_u32_le, read_u8};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -55,9 +55,8 @@ pub const COMPRESSION_NONE: u16 = 0;
 /// Offset  Size  Field
 /// 0       u16   file_size      (total file size minus 2)
 /// 2       u16   compression    (0 = raw, 4 = LCW)
-/// 4       u16   buffer_size    (uncompressed pixel byte count)
-/// 6       u16   palette_size   (0 or 768)
-/// 8       u16   unknown
+/// 4       u32   buffer_size    (uncompressed pixel byte count)
+/// 8       u16   palette_size   (0 or 768)
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CpsHeader {
@@ -66,7 +65,7 @@ pub struct CpsHeader {
     /// Compression type: 0 = raw, 4 = LCW.
     pub compression: u16,
     /// Uncompressed image size in bytes (typically 64000).
-    pub buffer_size: u16,
+    pub buffer_size: u32,
     /// Embedded palette size: 0 (no palette) or 768 (256 × RGB).
     pub palette_size: u16,
 }
@@ -119,8 +118,8 @@ impl CpsFile {
 
         let file_size = read_u16_le(data, 0)?;
         let compression = read_u16_le(data, 2)?;
-        let buffer_size = read_u16_le(data, 4)?;
-        let palette_size = read_u16_le(data, 6)?;
+        let buffer_size = read_u32_le(data, 4)?;
+        let palette_size = read_u16_le(data, 8)?;
 
         // V38: validate compression type.
         if compression != COMPRESSION_NONE && compression != COMPRESSION_LCW {
@@ -130,7 +129,7 @@ impl CpsFile {
         }
 
         // V38: cap uncompressed buffer size.
-        if (buffer_size as usize) > MAX_BUFFER_SIZE {
+        if buffer_size as usize > MAX_BUFFER_SIZE {
             return Err(Error::InvalidSize {
                 value: buffer_size as usize,
                 limit: MAX_BUFFER_SIZE,

@@ -4,8 +4,22 @@
 //! Parser for the C&C Compiled String Format (`.csf`).
 //!
 //! CSF files are used in Tiberian Sun, Red Alert 2, and Generals to store
-//! localized string tables. Note that while Tiberian Sun nominally introduced
-//! them, they became heavily utilized in RA2 and Generals.
+//! localized string tables.  String values are encoded as bitwise-NOT UTF-16LE.
+//!
+//! ## File Layout
+//!
+//! ```text
+//! [Header]      24 bytes: " FSC" magic + version + label_count + string_count
+//!                         + unused(4) + language(4)
+//! [Label 0]     " LBL" + string_count(4) + name_len(4) + name(N)
+//!   [String 0]  " STR" / "STRW" / " RTS" + char_count(4) + utf16le_data(N*2)
+//!               [extra_len(4) + extra_ascii(M)]  (STRW only)
+//! [Label 1]     ...
+//! ```
+//!
+//! ## References
+//!
+//! Format source: ModEnc wiki (CSF format), OpenRA source analysis.
 
 use crate::error::Error;
 use std::collections::HashMap;
@@ -66,7 +80,7 @@ impl CsfFile {
     /// Parses a CSF file from a byte slice.
     ///
     /// Evaluates the `FSC ` header, iterates over ` LBL` entries, and decodes
-    /// the bitwise-NOT (XOR `0xFF`) UTF-16LE characters in ` STR` or ` STRW` payloads.
+    /// the bitwise-NOT (XOR `0xFF`) UTF-16LE characters in ` STR`, ` STRW`, or ` RTS` payloads.
     pub fn parse(data: &[u8]) -> Result<Self, Error> {
         let mut offset: usize = 0;
 
@@ -124,9 +138,12 @@ impl CsfFile {
                 let has_extra = match str_magic {
                     b" STR" => false,
                     b"STRW" => true,
+                    // RA2 and Generals use " RTS" as the string entry marker
+                    // (the reverse of " STR"), without an extra data field.
+                    b" RTS" => false,
                     _ => {
                         return Err(Error::InvalidMagic {
-                            context: "CSF string entry (expected ' STR' or 'STRW')",
+                            context: "CSF string entry (expected ' STR', 'STRW', or ' RTS')",
                         })
                     }
                 };

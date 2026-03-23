@@ -144,6 +144,51 @@ fn parse_for_check(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> 
         Format::TmpTs => {
             cnc_formats::tmp::TsTmpFile::parse(data)?;
         }
+        Format::Voc => {
+            cnc_formats::voc::VocFile::parse(data)?;
+        }
+        Format::Pak => {
+            cnc_formats::pak::PakArchive::parse(data)?;
+        }
+        Format::ShpD2 => {
+            cnc_formats::shp_d2::ShpD2File::parse(data)?;
+        }
+        Format::Icn => {
+            cnc_formats::icn::IcnFile::parse(data, 16, 16)?;
+        }
+        Format::D2Map => {
+            cnc_formats::d2_map::D2Scenario::parse(data)?;
+        }
+        Format::BinTd => {
+            cnc_formats::bin_td::BinMap::parse(data, 64, 64)?;
+        }
+        Format::Mpr => {
+            cnc_formats::mpr::MprFile::parse(data)?;
+        }
+        Format::BagIdx => {
+            cnc_formats::bag_idx::IdxFile::parse(data)?;
+        }
+        Format::MapRa2 => {
+            cnc_formats::map_ra2::MapRa2File::parse(data)?;
+        }
+        Format::Wnd => {
+            cnc_formats::wnd::WndFile::parse(data)?;
+        }
+        Format::SageStr => {
+            cnc_formats::sage_str::StrFile::parse(data)?;
+        }
+        Format::MapSage => {
+            cnc_formats::map_sage::MapSageFile::parse(data)?;
+        }
+        Format::Apt => {
+            cnc_formats::apt::AptFile::parse(data)?;
+        }
+        Format::Dds => {
+            cnc_formats::dds::DdsFile::parse(data)?;
+        }
+        Format::Tga => {
+            cnc_formats::tga::TgaFile::parse(data)?;
+        }
         #[cfg(feature = "miniyaml")]
         Format::Miniyaml => {
             cnc_formats::miniyaml::MiniYamlDoc::parse(data)?;

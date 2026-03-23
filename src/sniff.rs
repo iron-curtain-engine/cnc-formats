@@ -53,6 +53,24 @@ pub fn sniff_format(data: &[u8]) -> Option<&'static str> {
     if is_csf(data) {
         return Some("csf");
     }
+    if is_voc(data) {
+        return Some("voc");
+    }
+    if is_dds(data) {
+        return Some("dds");
+    }
+    if is_apt(data) {
+        return Some("apt");
+    }
+    if is_map_sage(data) {
+        return Some("map_sage");
+    }
+    if is_jpg(data) {
+        return Some("jpg");
+    }
+    if is_tga_footer(data) {
+        return Some("tga");
+    }
     if is_mix(data) {
         return Some("mix");
     }
@@ -103,6 +121,9 @@ pub fn sniff_format(data: &[u8]) -> Option<&'static str> {
     }
     if is_hva(data) {
         return Some("hva");
+    }
+    if is_tga(data) {
+        return Some("tga");
     }
 
     None
@@ -380,6 +401,61 @@ fn is_wsa(data: &[u8]) -> bool {
     crate::wsa::WsaFile::parse(data).is_ok()
 }
 
+/// VOC: strong 20-byte magic "Creative Voice File\x1a".
+fn is_voc(data: &[u8]) -> bool {
+    data.len() >= 26 && data.get(..20) == Some(b"Creative Voice File\x1a")
+}
+
+/// DDS: strong 4-byte magic "DDS " followed by header size 124.
+fn is_dds(data: &[u8]) -> bool {
+    if data.len() < 128 {
+        return false;
+    }
+    if data.get(..4) != Some(b"DDS ") {
+        return false;
+    }
+    // Header size at offset 4 must be 124.
+    read_u32_le(data, 4).ok() == Some(124)
+}
+
+/// APT: strong 4-byte magic "Apt\0".
+fn is_apt(data: &[u8]) -> bool {
+    data.len() >= 8 && data.get(..4) == Some(b"Apt\0")
+}
+
+/// SAGE map: strong 4-byte magic "CkMp".
+fn is_map_sage(data: &[u8]) -> bool {
+    data.len() >= 4 && data.get(..4) == Some(b"CkMp")
+}
+
+/// JPEG: strong 3-byte magic `FF D8 FF`.
+fn is_jpg(data: &[u8]) -> bool {
+    data.len() >= 3 && data.get(..3) == Some(&[0xFF, 0xD8, 0xFF])
+}
+
+/// TGA 2.0: strong footer signature "TRUEVISION-XFILE.\0" in last 18 bytes.
+fn is_tga_footer(data: &[u8]) -> bool {
+    data.len() >= 18 + 26 && data.get(data.len() - 18..) == Some(b"TRUEVISION-XFILE.\0")
+}
+
+/// TGA: heuristic — valid image type + reasonable dimensions (no footer).
+fn is_tga(data: &[u8]) -> bool {
+    if data.len() < 18 {
+        return false;
+    }
+    let image_type = match data.get(2) {
+        Some(&t) => t,
+        None => return false,
+    };
+    matches!(image_type, 1 | 2 | 3 | 9 | 10 | 11)
+        && read_u16_le(data, 12)
+            .ok()
+            .is_some_and(|w| w > 0 && w <= 16384)
+        && read_u16_le(data, 14)
+            .ok()
+            .is_some_and(|h| h > 0 && h <= 16384)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,5 +579,92 @@ mod tests {
         // Build a minimal valid SHP: 1 frame, 2×2 pixels, LCW-compressed.
         let shp_bytes = crate::shp::build_test_shp_helper(2, 2, 0xAA);
         assert_eq!(sniff_format(&shp_bytes), Some("shp"));
+    }
+
+    /// VOC files are detected by "Creative Voice File\x1a" magic.
+    #[test]
+    fn sniff_voc() {
+        let mut data = vec![0u8; 32];
+        data[..20].copy_from_slice(b"Creative Voice File\x1a");
+        data[20..22].copy_from_slice(&26u16.to_le_bytes());
+        assert_eq!(sniff_format(&data), Some("voc"));
+    }
+
+    /// DDS files are detected by "DDS " magic + header size 124.
+    #[test]
+    fn sniff_dds() {
+        let mut data = vec![0u8; 128];
+        data[..4].copy_from_slice(b"DDS ");
+        data[4..8].copy_from_slice(&124u32.to_le_bytes());
+        assert_eq!(sniff_format(&data), Some("dds"));
+    }
+
+    /// APT files are detected by "Apt\0" magic.
+    #[test]
+    fn sniff_apt() {
+        let mut data = vec![0u8; 16];
+        data[..4].copy_from_slice(b"Apt\0");
+        assert_eq!(sniff_format(&data), Some("apt"));
+    }
+
+    /// SAGE map files are detected by "CkMp" magic.
+    #[test]
+    fn sniff_map_sage() {
+        let mut data = vec![0u8; 16];
+        data[..4].copy_from_slice(b"CkMp");
+        assert_eq!(sniff_format(&data), Some("map_sage"));
+    }
+
+    /// JPEG files are detected by FF D8 FF magic.
+    #[test]
+    fn sniff_jpg() {
+        let mut data = vec![0u8; 32];
+        data[0] = 0xFF;
+        data[1] = 0xD8;
+        data[2] = 0xFF;
+        data[3] = 0xE0; // JFIF APP0 marker
+        assert_eq!(sniff_format(&data), Some("jpg"));
+    }
+
+    /// JPEG: 2 bytes (FF D8 without third FF) is not detected.
+    #[test]
+    fn sniff_jpg_too_short() {
+        assert_eq!(sniff_format(&[0xFF, 0xD8]), None);
+    }
+
+    /// JPEG: FF D8 followed by non-FF is not detected.
+    #[test]
+    fn sniff_jpg_invalid_third_byte() {
+        assert_eq!(sniff_format(&[0xFF, 0xD8, 0x00, 0x00]), None);
+    }
+
+    /// JPEG: single byte is not detected.
+    #[test]
+    fn sniff_jpg_single_byte() {
+        assert_eq!(sniff_format(&[0xFF]), None);
+    }
+
+    /// TGA files with v2.0 footer are detected.
+    #[test]
+    fn sniff_tga_footer() {
+        // Build a buffer large enough that the footer doesn't overlap the header,
+        // and fill with non-zero pixel data to avoid triggering other sniffers.
+        let mut data = vec![0x42u8; 128];
+        // Write 18-byte TGA header.
+        data[0] = 0; // id_length
+        data[1] = 0; // no color map
+        data[2] = 2; // true-color
+        data[3..8].copy_from_slice(&[0; 5]); // color map spec
+        data[8..12].copy_from_slice(&[0; 4]); // origin
+        data[12..14].copy_from_slice(&4u16.to_le_bytes()); // width
+        data[14..16].copy_from_slice(&4u16.to_le_bytes()); // height
+        data[16] = 24; // pixel_depth
+        data[17] = 0x20; // top-to-bottom
+                         // Append TGA 2.0 footer at the very end.
+        let footer_start = data.len() - 26;
+        data[footer_start..footer_start + 4].copy_from_slice(&0u32.to_le_bytes());
+        data[footer_start + 4..footer_start + 8].copy_from_slice(&0u32.to_le_bytes());
+        data[footer_start + 8..].copy_from_slice(b"TRUEVISION-XFILE.\0");
+        assert_eq!(sniff_format(&data), Some("tga"));
     }
 }

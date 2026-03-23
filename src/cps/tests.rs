@@ -8,7 +8,7 @@ use super::*;
 /// Builds a valid CPS file with LCW-compressed pixel data and no palette.
 fn build_cps_lcw(pixels: &[u8]) -> Vec<u8> {
     let compressed = crate::lcw::compress(pixels);
-    let buffer_size = pixels.len() as u16;
+    let buffer_size = pixels.len() as u32;
     // file_size = total - 2
     let total = HEADER_SIZE + compressed.len();
     let file_size = (total.saturating_sub(2)) as u16;
@@ -16,25 +16,23 @@ fn build_cps_lcw(pixels: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(total);
     buf.extend_from_slice(&file_size.to_le_bytes());
     buf.extend_from_slice(&COMPRESSION_LCW.to_le_bytes());
-    buf.extend_from_slice(&buffer_size.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes()); // palette_size = 0
-    buf.extend_from_slice(&0u16.to_le_bytes()); // unknown
+    buf.extend_from_slice(&buffer_size.to_le_bytes()); // u32 at offset 4
+    buf.extend_from_slice(&0u16.to_le_bytes()); // palette_size = 0 at offset 8
     buf.extend_from_slice(&compressed);
     buf
 }
 
 /// Builds a valid CPS file with raw pixels (no compression, no palette).
 fn build_cps_raw(pixels: &[u8]) -> Vec<u8> {
-    let buffer_size = pixels.len() as u16;
+    let buffer_size = pixels.len() as u32;
     let total = HEADER_SIZE + pixels.len();
     let file_size = (total.saturating_sub(2)) as u16;
 
     let mut buf = Vec::with_capacity(total);
     buf.extend_from_slice(&file_size.to_le_bytes());
     buf.extend_from_slice(&COMPRESSION_NONE.to_le_bytes());
-    buf.extend_from_slice(&buffer_size.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&buffer_size.to_le_bytes()); // u32 at offset 4
+    buf.extend_from_slice(&0u16.to_le_bytes()); // palette_size = 0 at offset 8
     buf.extend_from_slice(pixels);
     buf
 }
@@ -42,16 +40,15 @@ fn build_cps_raw(pixels: &[u8]) -> Vec<u8> {
 /// Builds a valid CPS file with LCW compression and an embedded palette.
 fn build_cps_with_palette(pixels: &[u8]) -> Vec<u8> {
     let compressed = crate::lcw::compress(pixels);
-    let buffer_size = pixels.len() as u16;
+    let buffer_size = pixels.len() as u32;
     let total = HEADER_SIZE + PALETTE_BYTES + compressed.len();
     let file_size = (total.saturating_sub(2)) as u16;
 
     let mut buf = Vec::with_capacity(total);
     buf.extend_from_slice(&file_size.to_le_bytes());
     buf.extend_from_slice(&COMPRESSION_LCW.to_le_bytes());
-    buf.extend_from_slice(&buffer_size.to_le_bytes());
-    buf.extend_from_slice(&768u16.to_le_bytes()); // palette_size = 768
-    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&buffer_size.to_le_bytes()); // u32 at offset 4
+    buf.extend_from_slice(&768u16.to_le_bytes()); // palette_size = 768 at offset 8
 
     // Palette: 256 colors, each (i, i/2, i/3) for distinctness.
     for i in 0..256u16 {
@@ -139,9 +136,8 @@ fn invalid_compression() {
 
 /// Buffer size field is correctly bounded by the V38 cap.
 ///
-/// Note: buffer_size is u16 (max 65535) which is always below the
-/// 262144 cap, so this verifies the field reads correctly rather than
-/// triggering the cap.
+/// Note: buffer_size is u32; small test values are always below the
+/// 262144 cap, so this verifies the field reads correctly.
 #[test]
 fn buffer_size_within_cap() {
     let pixels = vec![0u8; 16];
@@ -154,8 +150,8 @@ fn buffer_size_within_cap() {
 #[test]
 fn invalid_palette_size() {
     let mut data = build_cps_raw(&[0; 16]);
-    data[6] = 100; // palette_size = 100
-    data[7] = 0;
+    data[8] = 100; // palette_size = 100 at offset 8 (after 4-byte buffer_size)
+    data[9] = 0;
     let err = CpsFile::parse(&data).unwrap_err();
     assert!(matches!(err, Error::InvalidSize { .. }));
 }
@@ -165,8 +161,8 @@ fn invalid_palette_size() {
 fn truncated_palette() {
     let mut data = vec![0u8; HEADER_SIZE + 100]; // not enough for 768 palette bytes
     data[2..4].copy_from_slice(&COMPRESSION_NONE.to_le_bytes());
-    data[4..6].copy_from_slice(&16u16.to_le_bytes());
-    data[6..8].copy_from_slice(&768u16.to_le_bytes());
+    data[4..8].copy_from_slice(&16u32.to_le_bytes()); // buffer_size as u32 at offset 4
+    data[8..10].copy_from_slice(&768u16.to_le_bytes()); // palette_size at offset 8
     let err = CpsFile::parse(&data).unwrap_err();
     assert!(matches!(err, Error::UnexpectedEof { .. }));
 }
