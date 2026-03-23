@@ -34,6 +34,10 @@
 //! 0=cell_number
 //! ...
 //! ```
+//!
+//! ## References
+//!
+//! Format source: XCC Utilities documentation, CnC-Tools wiki, ModEnc wiki.
 
 use crate::error::Error;
 use crate::ini::IniFile;

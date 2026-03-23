@@ -13,6 +13,10 @@
 //! [Entry 1]   36 bytes
 //! ...
 //! ```
+//!
+//! ## References
+//!
+//! Format source: XCC Utilities documentation, OpenRA source analysis.
 
 use crate::error::Error;
 use crate::read::read_u32_le;

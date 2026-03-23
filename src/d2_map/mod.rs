@@ -13,6 +13,10 @@
 //! [Header]         16 bytes (flags, seed, limits, camera, scale, house)
 //! [Placements]     variable (structures, units, reinforcements)
 //! ```
+//!
+//! ## References
+//!
+//! Format source: Dune Legacy project documentation, CnC-Tools wiki.
 
 use crate::error::Error;
 use crate::read::read_u16_le;

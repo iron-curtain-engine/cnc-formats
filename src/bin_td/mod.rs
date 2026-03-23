@@ -16,6 +16,10 @@
 //! ...
 //! [Cell N-1]
 //! ```
+//!
+//! ## References
+//!
+//! Format source: XCC Utilities documentation, CnC-Tools wiki.
 
 use crate::error::Error;
 use crate::read::read_u8;

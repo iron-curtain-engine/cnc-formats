@@ -15,6 +15,10 @@
 //! "Localized string"
 //! END
 //! ```
+//!
+//! ## References
+//!
+//! Format source: Generals modding community documentation, OpenSAGE project source analysis.
 
 use crate::error::Error;
 
@@ -90,7 +94,10 @@ impl StrFile {
                     context: "STR string entry (value must be double-quoted)",
                 });
             }
-            let value = value_line[1..value_line.len() - 1].to_string();
+            let value = value_line
+                .get(1..value_line.len() - 1)
+                .unwrap_or("")
+                .to_string();
 
             // Read the END keyword.
             let end_line = loop {

@@ -5,6 +5,35 @@ use super::tests::build_shp;
 use super::*;
 
 #[test]
+fn parse_sentinel_nonzero_ref_fields_accepted() {
+    // RA1 game files (e.g. from REDALERT.MIX) carry non-zero ref_offset /
+    // ref_format in the EOF-sentinel entry.  These fields are not meaningful
+    // for a sentinel so the parser must accept them.
+    let mut bytes = build_shp(2, 2, 0, &[&[0xFE, 0x04, 0x00, 0xAB, 0x80]], None);
+    let sentinel_start = 14 + OFFSET_ENTRY_SIZE; // frame_count = 1
+                                                 // ref_offset (bytes 4–5 of the entry)
+    bytes[sentinel_start + 4] = 0x12;
+    bytes[sentinel_start + 5] = 0x34;
+    // ref_format (bytes 6–7 of the entry)
+    bytes[sentinel_start + 6] = 0x56;
+    bytes[sentinel_start + 7] = 0x78;
+    assert!(ShpFile::parse(&bytes).is_ok());
+}
+
+#[test]
+fn parse_padding_nonzero_ref_fields_accepted() {
+    // Same real-world scenario for the zero-padding entry that follows the
+    // EOF sentinel.
+    let mut bytes = build_shp(2, 2, 0, &[&[0xFE, 0x04, 0x00, 0xAB, 0x80]], None);
+    let padding_start = 14 + 2 * OFFSET_ENTRY_SIZE; // frame_count + 1
+    bytes[padding_start + 4] = 0xFF;
+    bytes[padding_start + 5] = 0xFF;
+    bytes[padding_start + 6] = 0xFF;
+    bytes[padding_start + 7] = 0xFF;
+    assert!(ShpFile::parse(&bytes).is_ok());
+}
+
+#[test]
 fn parse_frame_offset_before_payload_rejected() {
     let frame_count: u16 = 1;
     let total_entries = frame_count as usize + EXTRA_OFFSET_ENTRIES;

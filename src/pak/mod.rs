@@ -13,6 +13,10 @@
 //! [File 0 data]   ...
 //! [File 1 data]   ...
 //! ```
+//!
+//! ## References
+//!
+//! Format source: Dune Legacy project documentation, CnC-Tools wiki.
 
 use crate::error::Error;
 use crate::read::read_u32_le;

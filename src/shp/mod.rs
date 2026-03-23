@@ -368,7 +368,11 @@ impl<'input> ShpFile<'input> {
             offset: frame_count,
             bound: entries.len(),
         })?;
-        if eof_entry.format_byte != 0 || eof_entry.ref_offset != 0 || eof_entry.ref_format != 0 {
+        // Only format_byte identifies the sentinel as a non-frame entry
+        // (valid frame codes are 0x20 / 0x40 / 0x80).  ref_offset and
+        // ref_format carry no meaning here and original Westwood tools
+        // wrote non-zero garbage into those positions on some RA1 assets.
+        if eof_entry.format_byte != 0 {
             return Err(Error::InvalidMagic {
                 context: "SHP EOF sentinel",
             });
@@ -385,11 +389,9 @@ impl<'input> ShpFile<'input> {
             offset: frame_count + 1,
             bound: entries.len(),
         })?;
-        if padding_entry.file_offset != 0
-            || padding_entry.format_byte != 0
-            || padding_entry.ref_offset != 0
-            || padding_entry.ref_format != 0
-        {
+        // Same rationale: ref_offset/ref_format are not meaningful in the
+        // padding slot; only file_offset and format_byte must be zero.
+        if padding_entry.file_offset != 0 || padding_entry.format_byte != 0 {
             return Err(Error::InvalidMagic {
                 context: "SHP zero-padding entry",
             });

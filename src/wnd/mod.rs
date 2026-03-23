@@ -35,6 +35,10 @@
 //! (e.g. `SCREENRECT` with sub-fields) are kept as-is for the engine
 //! layer to interpret. The parser handles WINDOW/END block structure
 //! with CHILD (per-child prefix) and ENDALLCHILDREN (group terminator).
+//!
+//! ## References
+//!
+//! Format source: Generals modding community documentation, OpenSAGE project source analysis.
 
 use crate::error::Error;
 

@@ -13,6 +13,10 @@
 //! [Tile 0]   tile_width * tile_height bytes (palette indices)
 //! [Tile 1]   ...
 //! ```
+//!
+//! ## References
+//!
+//! Format source: CnC-Tools documentation, Dune Legacy project source analysis.
 
 use crate::error::Error;
 use crate::read::read_u16_le;

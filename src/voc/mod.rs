@@ -16,6 +16,10 @@
 //! [Block 1]       ...
 //! [Terminator]    1 byte (type 0)
 //! ```
+//!
+//! ## References
+//!
+//! Format source: Creative Voice File specification (Creative Labs), XCC Utilities documentation.
 
 use crate::error::Error;
 use crate::read::{read_u16_le, read_u8};
