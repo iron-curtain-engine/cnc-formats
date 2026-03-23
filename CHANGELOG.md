@@ -5,6 +5,38 @@ All notable changes to the `cnc-formats` crate and `cncf` CLI will be documented
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.3] - 2026-03-23
+
+### Added
+- **New Format Parsers**: Added complete parsers for fifteen additional C&C/SAGE/Dune formats:
+  - **APT** — Red Alert 2 audio track index files.
+  - **BAG/IDX** — Red Alert 2 / Yuri's Revenge audio archives (`.bag` data + `.idx` index pairs).
+  - **BIN-TD** — Tiberian Dawn / Red Alert 1 binary tileset maps.
+  - **D2 Map** — Dune II binary scenario files.
+  - **DDS** — DirectDraw Surface compressed textures used in Generals and Zero Hour.
+  - **ICN** — Dune II / Tiberian Dawn icon tile and ICON.MAP files.
+  - **MAP-RA2** — Red Alert 2 / Yuri's Revenge INI-based map files.
+  - **MAP-SAGE** — Generals / Zero Hour binary chunk-based map files (`.map`).
+  - **MPR** — Tiberian Dawn / Red Alert 1 binary map files.
+  - **PAK** — Dune II resource archive files.
+  - **SAGE-STR** — Generals / Zero Hour binary string stream files.
+  - **SHP-D2** — Dune II sprite files (distinct format from the C&C SHP variant).
+  - **TGA** — Truevision Targa image files used in various C&C titles.
+  - **VOC** — Creative Voice audio files used in Dune II and Tiberian Dawn.
+  - **WND** — Generals / Zero Hour UI window layout files.
+- **CLI `check` Subcommand**: New command that validates a file's format and reports any parse errors.
+- **CLI `inspect` Extras**: Extended `cncf inspect` with per-format supplementary metadata for deeper file introspection.
+- **CLI `extract` Stored-File Support**: `cncf extract` can now extract stored (non-archive) files directly.
+- **AGENTS.md**: Added coding-principle reference document (`P1`–`P7`) for contributor and AI-agent guidance.
+
+### Fixed
+- **CPS Parser**: `buffer_size` field corrected from `u16` to `u32` to match the actual 4-byte on-disk layout; `palette_size` read offset adjusted accordingly.
+- **CSF Parser**: Accept ` RTS` as a valid string entry marker (used in Red Alert 2 and Generals `.csf` files alongside ` STR` and `STRW`).
+- **WND Parser**: Replaced the incorrect `CHILD`/`ENDCHILD` block grammar with the real Generals format: individual `CHILD` keywords before each nested `WINDOW` block, closed by `ENDALLCHILDREN`.
+- **MAP-SAGE Parser**: Recognize the 18-byte outer `EAR\0` header present in real Generals / Zero Hour `.map` files and skip to the inner `CkMp` chunk stream.
+- **BAG/IDX Parser**: Replaced direct slice indexing with bounds-checked `get` access (AGENTS.md P1 compliance).
+- **Documentation**: Removed private intra-doc links (`[`CONSTANT`]`) from public doc comments in `bin_td`, `d2_map`, `icn`, `map_ra2`, and `voc` that caused `RUSTDOCFLAGS=-D warnings` build failures.
+
 ## [0.1.0-alpha.2] - 2026-03-20
 
 ### Added
