@@ -5,6 +5,13 @@ All notable changes to the `cnc-formats` crate and `cncf` CLI will be documented
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.4] - 2026-03-23
+
+### Fixed
+- **SHP Parser**: Relaxed EOF-sentinel and zero-padding entry validation to accept non-zero `ref_offset`/`ref_format` fields. Original Westwood tools wrote garbage into those positions on some RA1 assets; only `format_byte` (and `file_offset` for the padding slot) carry semantic meaning and are validated.
+- **SAGE-STR Parser**: Replaced direct string slice `[1..len-1]` with bounds-safe `.get()` access (AGENTS.md P1 compliance).
+- **Module Documentation**: Added missing `## References` section to nine format modules (`bag_idx`, `bin_td`, `d2_map`, `icn`, `mpr`, `pak`, `sage_str`, `voc`, `wnd`) to satisfy AGENTS.md P5 requirements.
+
 ## [0.1.0-alpha.3] - 2026-03-23
 
 ### Added

@@ -31,7 +31,7 @@ C&C titles — see the full format list below.
     <img src="https://img.shields.io/github/v/release/iron-curtain-engine/cnc-formats?label=📥%20Download%20Latest%20Release&style=for-the-badge&color=brightgreen" alt="Download Latest Release">
   </a>
   <br>
-  <sub>Pre-built binaries for Windows, macOS, and Linux — or <code>cargo install cnc-formats --version 0.1.0-alpha.3</code> while the crate is prerelease</sub>
+  <sub>Pre-built binaries for Windows, macOS, and Linux — or <code>cargo install cnc-formats --version 0.1.0-alpha.4</code> while the crate is prerelease</sub>
 </p>
 
 ## Status
