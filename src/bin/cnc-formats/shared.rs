@@ -323,10 +323,7 @@ fn validate_data(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> {
         }
         Format::Shp => {
             let shp = cnc_formats::shp::ShpFile::parse(data)?;
-            let pixel_count = shp.frame_pixel_count();
-            for frame in &shp.frames {
-                let _ = cnc_formats::lcw::decompress(frame.data, pixel_count)?;
-            }
+            shp.decode_frames()?;
         }
         Format::Pal => {
             cnc_formats::pal::Palette::parse(data)?;

@@ -213,3 +213,49 @@ fn streaming_entry_metadata_matches_batch() {
         assert_eq!(b.size, s.size, "size mismatch");
     }
 }
+
+/// Proves that a `MixArchiveReader` opened on top of a `MixEntryReader`
+/// (simulating OUTER.MIX::INNER.MIX::LEAF read_nested_via_seek path)
+/// returns the correct bytes for all entries in the inner archive.
+///
+/// This is the scenario that fails for REDALERT.MIX::LORES.MIX::CLOCK.SHP:
+/// outer reader -> open_entry_by_index(lores_idx) -> MixEntryReader
+///              -> MixArchiveReader::open(&mut entry_reader)
+///              -> read_by_index(leaf_index)
+#[test]
+fn nested_read_via_entry_reader_returns_correct_bytes() {
+    let leaf_data = [0xABu8; 48]; // 48-byte payload, matches CLOCK.SHP scenario
+    let inner_mix = build_mix(&[("CLOCK.SHP", &leaf_data)]);
+
+    // Outer MIX contains the inner MIX as an entry.
+    let outer_mix = build_mix(&[("LORES.MIX", &inner_mix)]);
+
+    // Open the outer MIX with a streaming reader.
+    let mut outer = MixArchiveReader::open(Cursor::new(&outer_mix)).unwrap();
+
+    // Find LORES.MIX entry index.
+    let lores_idx = outer
+        .entries()
+        .iter()
+        .position(|e| e.crc == crc("LORES.MIX"))
+        .expect("LORES.MIX not found in outer MIX");
+
+    // Open bounded reader over the inner MIX (the critical path).
+    let mut entry_reader = outer
+        .open_entry_by_index(lores_idx)
+        .unwrap()
+        .expect("LORES.MIX entry should exist");
+
+    // Open streaming reader directly on the entry reader (no allocation).
+    let mut inner = MixArchiveReader::open(&mut entry_reader).unwrap();
+
+    // Find CLOCK.SHP in the inner MIX.
+    let clock_idx = inner
+        .entries()
+        .iter()
+        .position(|e| e.crc == crc("CLOCK.SHP"))
+        .expect("CLOCK.SHP not found in inner MIX");
+
+    let bytes = inner.read_by_index(clock_idx).unwrap().unwrap();
+    assert_eq!(bytes.as_slice(), &leaf_data[..], "CLOCK.SHP content mismatch");
+}

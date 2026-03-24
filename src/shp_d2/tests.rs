@@ -166,6 +166,36 @@ fn frame_access() {
     assert_eq!(all.len(), 2);
 }
 
+/// Parse a SHP D2 file using the relative-offset variant found in RA1 cursor
+/// sprites (MOUSE.SHP, EDMOUSE.SHP in LORES.MIX / EDITOR.MIX).  Offset table
+/// entries are relative to the start of the table (byte 2) rather than
+/// absolute from byte 0.
+#[test]
+fn parse_relative_offset_variant() {
+    let pixels = [0xCCu8; 30 * 24]; // 30×24, representative of MOUSE.SHP frame 0
+    let mut data = build_shp_d2_uncompressed(&[(30, 24, 0, &pixels)]);
+
+    // The builder emits absolute offsets.  Subtract 2 from every non-zero
+    // entry to produce the relative-offset variant that RA1 cursor files use.
+    let num_frames = 1usize;
+    let total_entries = num_frames + 2;
+    for i in 0..total_entries {
+        let pos = 2 + i * 4;
+        let val = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        if val != 0 {
+            data[pos..pos + 4].copy_from_slice(&(val - 2).to_le_bytes());
+        }
+    }
+
+    let shp = ShpD2File::parse(&data).unwrap();
+    assert_eq!(shp.frame_count(), 1);
+    let frame = shp.frame(0).unwrap();
+    assert_eq!(frame.width, 30);
+    assert_eq!(frame.height, 24);
+    assert_eq!(frame.pixels.len(), 30 * 24);
+    assert!(frame.pixels.iter().all(|&p| p == 0xCC));
+}
+
 // ── Error Paths ──────────────────────────────────────────────────────────────
 
 /// Input shorter than 2 bytes (cannot read num_frames) is rejected.

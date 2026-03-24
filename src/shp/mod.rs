@@ -160,14 +160,19 @@ pub struct ShpFrame<'input> {
     ///
     /// For [`ShpFrameFormat::Lcw`] frames, pass to [`crate::lcw::decompress`].
     /// For XOR-delta frames ([`ShpFrameFormat::XorLcw`] and
-    /// [`ShpFrameFormat::XorPrev`]), the bytes are an XOR-delta stream that
-    /// must be applied to a decoded reference frame.
+    /// [`ShpFrameFormat::XorPrev`]), the bytes are a **raw** (uncompressed)
+    /// XOR mask applied to a decoded reference frame — no LCW decompression.
     ///
     /// This is a borrow into the original input slice — no heap copy is made
     /// during parsing.
     pub data: &'input [u8],
     /// Encoding format of this frame.
     pub format: ShpFrameFormat,
+    /// Absolute byte offset of this frame's data within the source file.
+    ///
+    /// Used by [`ShpFile::decode_frames`] to look up the reference keyframe
+    /// for [`ShpFrameFormat::XorLcw`] frames (matched against `ref_offset`).
+    pub file_offset: u32,
     /// For [`ShpFrameFormat::XorLcw`]: the file offset of the reference
     /// keyframe whose decoded pixels serve as the base for the XOR delta.
     /// For other formats this value is not meaningful.
@@ -452,6 +457,7 @@ impl<'input> ShpFile<'input> {
             frames.push(ShpFrame {
                 data: frame_data,
                 format,
+                file_offset: entry.file_offset,
                 ref_offset: entry.ref_offset,
                 ref_format: entry.ref_format,
             });
@@ -479,52 +485,81 @@ impl<'input> ShpFile<'input> {
     /// Decodes all frames, resolving XOR-delta references.
     ///
     /// Returns one `Vec<u8>` per frame, each containing `width × height`
-    /// palette-indexed pixels.  Frames are decoded sequentially:
+    /// palette-indexed pixels.
     ///
-    /// - **Lcw (0x80):** LCW-decompress to produce standalone pixel buffer.
-    /// - **XorPrev (0x20):** LCW-decompress the delta, then XOR with the
-    ///   previous frame's decoded pixels.
-    /// - **XorLcw (0x40):** LCW-decompress the delta, then XOR with the
-    ///   previous frame's decoded pixels (same as XorPrev in practice —
-    ///   both reference the immediately preceding frame in sequential decode).
+    /// ## Encoding formats
     ///
-    /// ## Why sequential decode
+    /// - **Lcw (0x80) / `KF_KEYFRAME`:** LCW-decompress the data to produce a
+    ///   standalone pixel buffer.
+    /// - **XorLcw (0x40) / `KF_KEYDELTA`:** Apply the **raw** (uncompressed)
+    ///   delta bytes as an XOR mask against the decoded reference keyframe
+    ///   (identified by [`ShpFrame::ref_offset`]).  The delta itself is not
+    ///   LCW-compressed — only the *reference* keyframe is.
+    /// - **XorPrev (0x20) / `KF_DELTA`:** Apply the **raw** (uncompressed)
+    ///   delta bytes as an XOR mask against the immediately preceding decoded
+    ///   frame.  No LCW decompression at all.
     ///
-    /// Real-world C&C SHP files use sequential delta chains: frame 0 is a
-    /// keyframe, subsequent frames are XOR-deltas against the previous frame.
-    /// The `ref_offset` field in the offset table could theoretically point
-    /// to an arbitrary earlier frame, but no known game file does this.
-    /// Sequential decode handles all known game assets correctly.
+    /// Both XOR-delta types use raw byte streams, not LCW-compressed streams.
+    /// This matches the original Westwood engine (`2KEYFRAM.CPP`):
+    /// `KF_KEYDELTA` LCW-decompresses the *reference* frame, then XORs the
+    /// raw delta on top; `KF_DELTA` XORs the raw delta directly.
     ///
     /// # Errors
     ///
     /// - [`Error::DecompressionError`] if the first frame is not an LCW
-    ///   keyframe, or if LCW decompression fails for any frame.
+    ///   keyframe, if a reference frame cannot be found, or if LCW
+    ///   decompression of a keyframe fails.
     pub fn decode_frames(&self) -> Result<Vec<Vec<u8>>, Error> {
         let pixel_count = self.frame_pixel_count();
-        let mut decoded = Vec::with_capacity(self.frames.len());
+        let mut decoded: Vec<Vec<u8>> = Vec::with_capacity(self.frames.len());
+        // Tracks which decoded-frame index corresponds to each keyframe's file
+        // offset, so XorLcw frames can find their reference by `ref_offset`.
+        let mut keyframe_by_offset: std::collections::HashMap<u32, usize> =
+            std::collections::HashMap::new();
 
         for (i, frame) in self.frames.iter().enumerate() {
             match frame.format {
                 ShpFrameFormat::Lcw => {
-                    // Standalone keyframe: decompress directly.
+                    // KF_KEYFRAME (0x80): LCW-compressed standalone frame.
                     let pixels = lcw::decompress(frame.data, pixel_count)?;
+                    keyframe_by_offset.insert(frame.file_offset, i);
                     decoded.push(pixels);
                 }
-                ShpFrameFormat::XorLcw | ShpFrameFormat::XorPrev => {
-                    // XOR-delta: decompress the delta, then XOR with previous.
+                ShpFrameFormat::XorLcw => {
+                    // KF_KEYDELTA (0x40): raw XOR-delta against a reference keyframe.
+                    // The delta bytes are NOT LCW-compressed; look up the decoded
+                    // reference frame by file_offset (matching frame.ref_offset).
                     if i == 0 {
                         return Err(Error::DecompressionError {
                             reason: "first frame must be an LCW keyframe, not XOR-delta",
                         });
                     }
-                    let delta = lcw::decompress(frame.data, pixel_count)?;
-                    let prev = decoded.get(i - 1).ok_or(Error::DecompressionError {
-                        reason: "missing previous frame for XOR-delta",
+                    let ref_idx = keyframe_by_offset
+                        .get(&(frame.ref_offset as u32))
+                        .copied()
+                        .unwrap_or(i - 1);
+                    let base = decoded.get(ref_idx).ok_or(Error::DecompressionError {
+                        reason: "missing reference keyframe for XorLcw delta",
                     })?;
-                    // XOR the delta with the previous frame to produce current.
+                    let mut pixels = base.clone();
+                    for (dst, src) in pixels.iter_mut().zip(frame.data.iter()) {
+                        *dst ^= *src;
+                    }
+                    decoded.push(pixels);
+                }
+                ShpFrameFormat::XorPrev => {
+                    // KF_DELTA (0x20): raw XOR-delta against the previous decoded frame.
+                    // The delta bytes are NOT LCW-compressed.
+                    if i == 0 {
+                        return Err(Error::DecompressionError {
+                            reason: "first frame must be an LCW keyframe, not XOR-delta",
+                        });
+                    }
+                    let prev = decoded.get(i - 1).ok_or(Error::DecompressionError {
+                        reason: "missing previous frame for XorPrev delta",
+                    })?;
                     let mut pixels = prev.clone();
-                    for (dst, src) in pixels.iter_mut().zip(delta.iter()) {
+                    for (dst, src) in pixels.iter_mut().zip(frame.data.iter()) {
                         *dst ^= *src;
                     }
                     decoded.push(pixels);

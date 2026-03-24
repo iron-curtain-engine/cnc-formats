@@ -263,6 +263,7 @@ fn pixels_xor_delta_returns_error() {
     let frame = ShpFrame {
         data: &[0xFF, 0xFF, 0xFF],
         format: ShpFrameFormat::XorPrev,
+        file_offset: 0,
         ref_offset: 0,
         ref_format: 0,
     };
@@ -275,6 +276,7 @@ fn pixels_invalid_lcw_returns_error() {
     let frame = ShpFrame {
         data: &[0xFF, 0xFF, 0xFF],
         format: ShpFrameFormat::Lcw,
+        file_offset: 0,
         ref_offset: 0,
         ref_format: 0,
     };

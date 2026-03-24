@@ -138,6 +138,23 @@ impl ShpD2File {
             offsets.push(offset);
         }
 
+        // ── Relative-offset variant ──────────────────────────────────────
+        // A subset of SHP D2 files (e.g. MOUSE.SHP, EDMOUSE.SHP from RA1)
+        // store offset table entries relative to the start of the table
+        // (byte 2) rather than absolute from byte 0.  Detection is
+        // unambiguous: if `offsets[0] == offset_table_bytes` the frame data
+        // starts right after the table in relative terms, which would place
+        // it *inside* the table in absolute terms — impossible for a valid
+        // absolute-offset file.  Promote all non-zero entries by adding
+        // `offset_table_start` (2) to convert them to absolute offsets.
+        if offsets.first().copied() == Some(offset_table_bytes) {
+            for o in offsets.iter_mut() {
+                if *o != 0 {
+                    *o = o.saturating_add(offset_table_start);
+                }
+            }
+        }
+
         // ── Parse each frame ────────────────────────────────────────────
         let mut frames = Vec::with_capacity(num_frames);
 
@@ -212,23 +229,23 @@ impl ShpD2File {
 
             // ── Pixel data ──────────────────────────────────────────────
             let pixel_data_end = pixel_data_offset.saturating_add(data_size);
-            if pixel_data_end > data.len() {
-                return Err(Error::UnexpectedEof {
-                    needed: pixel_data_end,
-                    available: data.len(),
-                });
-            }
-
-            let raw_pixels =
-                data.get(pixel_data_offset..pixel_data_end)
-                    .ok_or(Error::UnexpectedEof {
-                        needed: pixel_data_end,
-                        available: data.len(),
-                    })?;
 
             let is_uncompressed = flags & FLAG_UNCOMPRESSED != 0;
+
             let pixels = if is_uncompressed {
-                // Uncompressed: raw pixel data, must be at least pixel_count bytes.
+                // Uncompressed: data_size must cover at least pixel_count bytes.
+                if pixel_data_end > data.len() {
+                    return Err(Error::UnexpectedEof {
+                        needed: pixel_data_end,
+                        available: data.len(),
+                    });
+                }
+                let raw_pixels =
+                    data.get(pixel_data_offset..pixel_data_end)
+                        .ok_or(Error::UnexpectedEof {
+                            needed: pixel_data_end,
+                            available: data.len(),
+                        })?;
                 if raw_pixels.len() < pixel_count {
                     return Err(Error::UnexpectedEof {
                         needed: pixel_count,
@@ -238,6 +255,19 @@ impl ShpD2File {
                 raw_pixels[..pixel_count].to_vec()
             } else {
                 // LCW (Format80) compressed.
+                //
+                // Some SHP D2 files (e.g. MOUSE.SHP from RA1's LORES.MIX) store a
+                // `data_size` that overshoots the actual bytes available for the last
+                // frame.  The LCW decoder halts naturally once it has emitted
+                // `pixel_count` output bytes, so passing all bytes up to the file
+                // boundary is safe and correct.
+                let clamped_end = pixel_data_end.min(data.len());
+                let raw_pixels =
+                    data.get(pixel_data_offset..clamped_end)
+                        .ok_or(Error::UnexpectedEof {
+                            needed: pixel_data_offset.saturating_add(1),
+                            available: data.len(),
+                        })?;
                 lcw::decompress(raw_pixels, pixel_count)?
             };
 
