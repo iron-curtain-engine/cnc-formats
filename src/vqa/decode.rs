@@ -35,7 +35,7 @@
 use crate::error::Error;
 use crate::lcw;
 
-use super::render::{render_frame_pixels, VqaRenderGeometry};
+use super::render::{build_compact_codebook, render_frame_pixels, VqaRenderGeometry};
 use super::snd_decode::{append_snd0, append_snd1, append_snd2_stateful};
 use super::{VqaFile, VqaHeader};
 use std::borrow::Cow;
@@ -360,7 +360,17 @@ impl VqaDecodeState {
             block_size: self.block_size,
             fill_marker: self.fill_marker,
         };
-        render_frame_pixels(&geo, &self.codebook, vpt, pixels)
+        // Build a frequency-ordered compact codebook for this frame.
+        // Hot entries are packed at the front so repeated accesses stay in
+        // L1 cache.  Falls back to the original codebook when compaction
+        // cannot proceed safely (all-fill frame, tiny codebook, etc.).
+        if let Some((compact_cb, compact_vpt)) =
+            build_compact_codebook(&geo, &self.codebook, vpt)
+        {
+            render_frame_pixels(&geo, &compact_cb, &compact_vpt, pixels)
+        } else {
+            render_frame_pixels(&geo, &self.codebook, vpt, pixels)
+        }
     }
 
     fn render_frame(&self, vpt: &[u8]) -> Result<VqaFrame, Error> {
