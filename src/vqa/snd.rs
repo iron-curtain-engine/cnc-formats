@@ -68,6 +68,66 @@ fn decode_snd2_chunk(data: &[u8], stereo: bool) -> Vec<i16> {
     out
 }
 
+/// Decodes a single SND1 (Westwood ADPCM) chunk, carrying `cur_sample`
+/// across chunk boundaries.
+///
+/// `cur_sample` must be initialised to `0x80` (mid-scale) before the first
+/// chunk of a stream and passed unchanged for every subsequent chunk.  The
+/// caller updates it in-place with the final predictor value after each decode.
+pub(super) fn decode_snd1_chunk_stateful(
+    out: &mut Vec<i16>,
+    data: &[u8],
+    cur_sample: &mut i16,
+) -> Result<(), Error> {
+    if data.len() < 4 {
+        return Err(Error::UnexpectedEof {
+            needed: 4,
+            available: data.len(),
+        });
+    }
+    let out_size = read_u16_le(data, 0)? as usize;
+    let in_size = read_u16_le(data, 2)? as usize;
+
+    if out_size > MAX_AUDIO_CHUNK_SIZE {
+        return Err(Error::InvalidSize {
+            value: out_size,
+            limit: MAX_AUDIO_CHUNK_SIZE,
+            context: "SND1 output size",
+        });
+    }
+
+    let payload_end = 4usize.saturating_add(in_size);
+    if data.get(4..payload_end).is_none() {
+        return Err(Error::UnexpectedEof {
+            needed: payload_end,
+            available: data.len(),
+        });
+    }
+
+    let start = out.len();
+    out.resize(start.saturating_add(out_size), 0);
+    let mut pos = 4usize;
+    let mut remaining_output = out_size;
+    let mut mode = if in_size == out_size {
+        Snd1Mode::RawCopy { remaining: out_size }
+    } else {
+        Snd1Mode::Idle
+    };
+
+    let dst = out.get_mut(start..).unwrap_or(&mut []);
+    let written = read_snd1_samples(
+        data,
+        &mut pos,
+        payload_end,
+        &mut remaining_output,
+        cur_sample,
+        &mut mode,
+        dst,
+    )?;
+    out.truncate(start.saturating_add(written));
+    Ok(())
+}
+
 /// V38: maximum decompressed audio chunk size (1 MB).  Half a second of
 /// 44.1kHz stereo 16-bit = ~176 KB; 1 MB is very generous.
 const MAX_AUDIO_CHUNK_SIZE: usize = 1024 * 1024;
@@ -117,6 +177,16 @@ pub(super) enum VqaAudioChunkDecoder<'data> {
         cur_sample: i16,
         mode: Snd1Mode,
     },
+    /// Pre-decoded PCM samples stored directly as `i16`.
+    ///
+    /// Used for SND2 (IMA ADPCM) and stateful SND1 paths where the entire
+    /// chunk is decoded upfront into a `Vec<i16>`.  Avoids the
+    /// `i16 → bytes → i16` round-trip that the `Snd0Pcm16` variant would
+    /// require.
+    PcmDirect {
+        samples: Vec<i16>,
+        pos: usize,
+    },
 }
 
 impl VqaAudioChunkDecoder<'_> {
@@ -147,22 +217,21 @@ impl VqaAudioChunkDecoder<'_> {
             b"SND2" => {
                 // Decode the entire IMA ADPCM chunk upfront.
                 // State resets to (0, 0) per chunk; stereo uses split-half layout.
-                let pcm = decode_snd2_chunk(data.as_ref(), stereo);
-                let sample_count = pcm.len();
-                let mut bytes = Vec::with_capacity(sample_count * 2);
-                for s in &pcm {
-                    bytes.extend_from_slice(&s.to_le_bytes());
-                }
-                Ok(Some(VqaAudioChunkDecoder::Snd0Pcm16 {
-                    data: Cow::Owned(bytes),
-                    pos: 0,
-                }))
+                let samples = decode_snd2_chunk(data.as_ref(), stereo);
+                Ok(Some(VqaAudioChunkDecoder::PcmDirect { samples, pos: 0 }))
             }
             _ => Ok(None),
         }
     }
 
     fn open_snd1(data: Cow<'_, [u8]>) -> Result<VqaAudioChunkDecoder<'_>, Error> {
+        Self::open_snd1_with_state(data, 0x80)
+    }
+
+    pub(super) fn open_snd1_with_state(
+        data: Cow<'_, [u8]>,
+        initial_cur_sample: i16,
+    ) -> Result<VqaAudioChunkDecoder<'_>, Error> {
         if data.len() < 4 {
             return Err(Error::UnexpectedEof {
                 needed: 4,
@@ -193,7 +262,7 @@ impl VqaAudioChunkDecoder<'_> {
             pos: 4,
             payload_end,
             remaining_output: out_size,
-            cur_sample: 0x80,
+            cur_sample: initial_cur_sample,
             mode: if size == out_size {
                 Snd1Mode::RawCopy {
                     remaining: out_size,
@@ -225,6 +294,7 @@ impl VqaAudioChunkDecoder<'_> {
                 mode,
                 ..
             } => *remaining_output == 0 && matches!(mode, Snd1Mode::Idle),
+            Self::PcmDirect { samples, pos } => *pos >= samples.len(),
         }
     }
 
@@ -235,6 +305,7 @@ impl VqaAudioChunkDecoder<'_> {
             Self::Snd1 {
                 remaining_output, ..
             } => *remaining_output,
+            Self::PcmDirect { samples, pos } => samples.len().saturating_sub(*pos),
         }
     }
 
@@ -261,6 +332,7 @@ impl VqaAudioChunkDecoder<'_> {
                 mode,
                 out,
             ),
+            Self::PcmDirect { samples, pos } => read_pcm_direct(samples, pos, out),
         }
     }
 
@@ -272,49 +344,56 @@ impl VqaAudioChunkDecoder<'_> {
                 Cow::Owned(data) => Some(data),
                 Cow::Borrowed(_) => None,
             },
+            // PcmDirect holds Vec<i16>, not Vec<u8> — no raw byte buffer to return.
+            Self::PcmDirect { .. } => None,
         }
     }
 }
 
-fn read_snd0_pcm16(data: &[u8], pos: &mut usize, out: &mut [i16]) -> Result<usize, Error> {
-    let mut written = 0usize;
-    let out_len = out.len();
-    while written < out.len() {
-        let end = pos.saturating_add(2);
-        let sample_bytes = match data.get(*pos..end) {
-            Some(bytes) => bytes,
-            None => break,
-        };
-        let mut buf = [0u8; 2];
-        buf.copy_from_slice(sample_bytes);
-        let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
-            needed: written.saturating_add(1),
-            available: out_len,
-        })?;
-        *slot = i16::from_le_bytes(buf);
-        *pos = end;
-        written = written.saturating_add(1);
+/// Reads already-decoded `i16` samples directly — no conversion needed.
+fn read_pcm_direct(samples: &[i16], pos: &mut usize, out: &mut [i16]) -> Result<usize, Error> {
+    let available = samples.get(*pos..).unwrap_or(&[]);
+    let count = available.len().min(out.len());
+    if let (Some(src), Some(dst)) = (available.get(..count), out.get_mut(..count)) {
+        dst.copy_from_slice(src);
     }
-    Ok(written)
+    *pos = pos.saturating_add(count);
+    Ok(count)
 }
 
-fn read_snd0_pcm8(data: &[u8], pos: &mut usize, out: &mut [i16]) -> Result<usize, Error> {
-    let mut written = 0usize;
-    let out_len = out.len();
-    while written < out.len() {
-        let byte = match data.get(*pos).copied() {
-            Some(byte) => byte,
-            None => break,
-        };
-        let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
-            needed: written.saturating_add(1),
-            available: out_len,
-        })?;
-        *slot = pcm8_to_i16(byte);
-        *pos = pos.saturating_add(1);
-        written = written.saturating_add(1);
+/// Reads SND0 raw 16-bit LE PCM samples using a single bounds check per call.
+fn read_snd0_pcm16(data: &[u8], pos: &mut usize, out: &mut [i16]) -> Result<usize, Error> {
+    let available = data.get(*pos..).unwrap_or(&[]);
+    let pairs = available.len() / 2;
+    let count = pairs.min(out.len());
+    for (slot, chunk) in out
+        .get_mut(..count)
+        .unwrap_or(&mut [])
+        .iter_mut()
+        .zip(available.chunks_exact(2))
+    {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(chunk);
+        *slot = i16::from_le_bytes(buf);
     }
-    Ok(written)
+    *pos = pos.saturating_add(count.saturating_mul(2));
+    Ok(count)
+}
+
+/// Reads SND0 raw 8-bit PCM samples, up-converting to 16-bit in a single pass.
+fn read_snd0_pcm8(data: &[u8], pos: &mut usize, out: &mut [i16]) -> Result<usize, Error> {
+    let available = data.get(*pos..).unwrap_or(&[]);
+    let count = available.len().min(out.len());
+    for (slot, &byte) in out
+        .get_mut(..count)
+        .unwrap_or(&mut [])
+        .iter_mut()
+        .zip(available.iter())
+    {
+        *slot = pcm8_to_i16(byte);
+    }
+    *pos = pos.saturating_add(count);
+    Ok(count)
 }
 
 fn read_snd1_samples(
@@ -381,26 +460,30 @@ fn read_snd1_samples(
                 *mode = Snd1Mode::Idle;
             }
             Snd1Mode::RawCopy { remaining } => {
-                if *pos >= payload_end {
-                    return Err(Error::UnexpectedEof {
-                        needed: pos.saturating_add(1),
-                        available: data.len(),
-                    });
+                // Batch: copy as many bytes as fit in out[] in one slice copy.
+                let can_write = (*remaining).min(out.len().saturating_sub(written));
+                let can_read = payload_end.saturating_sub(*pos);
+                let n = can_write.min(can_read);
+                if n == 0 {
+                    if *pos >= payload_end {
+                        return Err(Error::UnexpectedEof {
+                            needed: pos.saturating_add(1),
+                            available: data.len(),
+                        });
+                    }
+                    break;
                 }
-                let byte = data.get(*pos).copied().ok_or(Error::UnexpectedEof {
-                    needed: pos.saturating_add(1),
-                    available: data.len(),
-                })?;
-                let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
-                    needed: written.saturating_add(1),
-                    available: out_len,
-                })?;
-                *slot = pcm8_to_i16(byte);
-                *cur_sample = byte as i16;
-                *pos = pos.saturating_add(1);
-                *remaining = remaining.saturating_sub(1);
-                *remaining_output = remaining_output.saturating_sub(1);
-                written = written.saturating_add(1);
+                let src = data.get(*pos..*pos + n).unwrap_or(&[]);
+                let dst = out.get_mut(written..written + src.len()).unwrap_or(&mut []);
+                for (d, &b) in dst.iter_mut().zip(src.iter()) {
+                    *d = pcm8_to_i16(b);
+                    *cur_sample = b as i16;
+                }
+                let actual = src.len();
+                *pos = pos.saturating_add(actual);
+                *remaining = remaining.saturating_sub(actual);
+                *remaining_output = remaining_output.saturating_sub(actual);
+                written = written.saturating_add(actual);
                 if *remaining == 0 {
                     *mode = Snd1Mode::Idle;
                 }
@@ -493,14 +576,17 @@ fn read_snd1_samples(
                 }
             }
             Snd1Mode::Repeat { remaining } => {
-                let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
-                    needed: written.saturating_add(1),
-                    available: out_len,
-                })?;
-                *slot = pcm8_to_i16(*cur_sample as u8);
-                *remaining = remaining.saturating_sub(1);
-                *remaining_output = remaining_output.saturating_sub(1);
-                written = written.saturating_add(1);
+                // Batch: fill as many output slots as possible with the current sample.
+                let n = (*remaining)
+                    .min(*remaining_output)
+                    .min(out.len().saturating_sub(written));
+                let value = pcm8_to_i16(*cur_sample as u8);
+                if let Some(dst) = out.get_mut(written..written.saturating_add(n)) {
+                    dst.fill(value);
+                }
+                *remaining = remaining.saturating_sub(n);
+                *remaining_output = remaining_output.saturating_sub(n);
+                written = written.saturating_add(n);
                 if *remaining == 0 {
                     *mode = Snd1Mode::Idle;
                 }

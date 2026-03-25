@@ -36,7 +36,7 @@ use crate::error::Error;
 use crate::lcw;
 
 use super::render::{build_compact_codebook, render_frame_pixels, VqaRenderGeometry};
-use super::snd_decode::{append_snd0, append_snd1, append_snd2_stateful};
+use super::snd_decode::{append_snd0, append_snd1_stateful, append_snd2_stateful};
 use super::{VqaFile, VqaHeader};
 use std::borrow::Cow;
 
@@ -525,11 +525,14 @@ impl VqaFile<'_> {
         let mut ima_l_index: usize = 0;
         let mut ima_r_sample: i32 = 0;
         let mut ima_r_index: usize = 0;
+        // SND1 Westwood ADPCM predictor is maintained across chunk boundaries.
+        let mut snd1_cur_sample: i16 = 0x80;
 
         for chunk in &self.chunks {
             let added = match &chunk.fourcc {
                 b"SND0" => append_snd0(&mut all_samples, chunk.data, self.header.bits)?,
-                b"SND1" => append_snd1(&mut all_samples, chunk.data)?,
+                // SND1: Westwood ADPCM, predictor state carried across chunks.
+                b"SND1" => append_snd1_stateful(&mut all_samples, chunk.data, &mut snd1_cur_sample)?,
                 // SND2: IMA ADPCM, state is maintained across chunks per VQA spec.
                 b"SND2" => append_snd2_stateful(
                     &mut all_samples,

@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025–present Iron Curtain contributors
 
-use super::super::snd::{decode_snd2_chunk_stateful, VqaAudioChunkDecoder};
+use super::super::snd::{decode_snd1_chunk_stateful, decode_snd2_chunk_stateful, VqaAudioChunkDecoder};
 use super::super::VqaHeader;
 use super::VqaAudioChunk;
 use crate::error::Error;
 
-use std::borrow::Cow;
 use std::collections::VecDeque;
 
 #[derive(Debug)]
@@ -87,6 +86,8 @@ pub(super) struct VqaAudioDecodeState {
     ima_r_sample: i32,
     /// IMA ADPCM right-channel step-index state, carried across SND2 chunk boundaries.
     ima_r_index: usize,
+    /// Westwood ADPCM predictor state, carried across SND1 chunk boundaries.
+    snd1_cur_sample: i16,
 }
 
 impl VqaAudioDecodeState {
@@ -105,6 +106,7 @@ impl VqaAudioDecodeState {
             ima_l_index: 0,
             ima_r_sample: 0,
             ima_r_index: 0,
+            snd1_cur_sample: 0x80,
         }
     }
 
@@ -117,7 +119,30 @@ impl VqaAudioDecodeState {
             return Ok((None, Some(data)));
         }
 
+        // SND1 (Westwood ADPCM): decode fully upfront, carrying predictor state.
+        if fourcc == b"SND1" {
+            let mut pcm: Vec<i16> = Vec::new();
+            decode_snd1_chunk_stateful(&mut pcm, &data, &mut self.snd1_cur_sample)?;
+            // Recycle the raw compressed buffer back to the caller.
+            let backing = Some(data);
+            let sample_count = pcm.len();
+            let sample_frames = sample_count / audio_channels_usize(self.channels);
+            if sample_frames == 0 {
+                return Ok((None, backing));
+            }
+            let decoder = VqaAudioChunkDecoder::PcmDirect { samples: pcm, pos: 0 };
+            let chunk = VqaQueuedAudio {
+                start_sample_frame: self.next_start_sample_frame,
+                decoder,
+            };
+            self.next_start_sample_frame = self
+                .next_start_sample_frame
+                .saturating_add(sample_frames as u64);
+            return Ok((Some(chunk), backing));
+        }
+
         // SND2 (IMA ADPCM): decode directly, carrying state across chunk boundaries.
+        // Stores decoded i16 samples in PcmDirect — no byte-roundtrip allocation.
         if fourcc == b"SND2" {
             let stereo = self.channels >= 2;
             let mut pcm: Vec<i16> = Vec::new();
@@ -137,15 +162,7 @@ impl VqaAudioDecodeState {
             if sample_frames == 0 {
                 return Ok((None, backing));
             }
-            // Pack decoded PCM into bytes for Snd0Pcm16.
-            let mut bytes = Vec::with_capacity(sample_count * 2);
-            for s in &pcm {
-                bytes.extend_from_slice(&s.to_le_bytes());
-            }
-            let decoder = VqaAudioChunkDecoder::Snd0Pcm16 {
-                data: Cow::Owned(bytes),
-                pos: 0,
-            };
+            let decoder = VqaAudioChunkDecoder::PcmDirect { samples: pcm, pos: 0 };
             let chunk = VqaQueuedAudio {
                 start_sample_frame: self.next_start_sample_frame,
                 decoder,

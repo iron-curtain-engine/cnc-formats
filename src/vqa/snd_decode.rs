@@ -3,10 +3,9 @@
 
 use crate::error::Error;
 
-use super::snd::{decode_snd2_chunk_stateful, VqaAudioChunkDecoder};
+use super::snd::{decode_snd1_chunk_stateful, decode_snd2_chunk_stateful, VqaAudioChunkDecoder};
 
 const FOURCC_SND0: [u8; 4] = *b"SND0";
-const FOURCC_SND1: [u8; 4] = *b"SND1";
 
 fn append_decoded_chunk(
     out: &mut Vec<i16>,
@@ -36,13 +35,18 @@ pub(super) fn append_snd0(out: &mut Vec<i16>, data: &[u8], bits: u8) -> Result<u
     append_decoded_chunk(out, decoder)
 }
 
-pub(super) fn append_snd1(out: &mut Vec<i16>, data: &[u8]) -> Result<usize, Error> {
-    let decoder = VqaAudioChunkDecoder::open_borrowed(&FOURCC_SND1, data, 8, false)?.ok_or(
-        Error::InvalidMagic {
-            context: "VQA SND1 audio chunk",
-        },
-    )?;
-    append_decoded_chunk(out, decoder)
+/// Decodes a SND1 chunk, carrying `cur_sample` across chunk boundaries.
+///
+/// Pass the same `cur_sample` for every consecutive chunk of the same stream.
+/// Initialise it to `0x80` before the first chunk.
+pub(super) fn append_snd1_stateful(
+    out: &mut Vec<i16>,
+    data: &[u8],
+    cur_sample: &mut i16,
+) -> Result<usize, Error> {
+    let start = out.len();
+    decode_snd1_chunk_stateful(out, data, cur_sample)?;
+    Ok(out.len() - start)
 }
 
 /// Carries IMA ADPCM state across chunk boundaries.
