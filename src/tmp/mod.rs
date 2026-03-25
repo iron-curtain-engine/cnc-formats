@@ -162,6 +162,23 @@ pub struct TdTmpFile<'input> {
     pub map_data: &'input [u8],
     /// The distinct tile images stored in the file.
     pub tiles: Vec<TdTmpTile<'input>>,
+    /// Per-icon transparency flags from the `TransFlag` offset.
+    ///
+    /// Each byte is a boolean flag: non-zero means the corresponding icon
+    /// contains at least one transparent pixel (palette index 0).  The
+    /// game uses this for fast clipping: fully opaque icons can skip
+    /// per-pixel transparency checks during rendering.
+    ///
+    /// Length is `count` bytes.  Empty if `trans_flag_offset` is 0.
+    pub trans_flags: &'input [u8],
+    /// Remap table data from the `Remaps` offset.
+    ///
+    /// Contains color remapping indices used by the game engine for
+    /// terrain tinting and ownership coloring.  The exact layout is
+    /// game-specific (typically `count` entries of varying size).
+    ///
+    /// Empty if `remaps_offset` is 0 or the data region cannot be bounded.
+    pub remap_data: &'input [u8],
 }
 
 impl<'input> TdTmpFile<'input> {
@@ -253,6 +270,47 @@ impl<'input> TdTmpFile<'input> {
             &[] as &[u8]
         };
 
+        // ── Transparency Flags ──────────────────────────────────────────
+        // One byte per icon: non-zero means the icon has transparent pixels.
+        let trans_flags = if trans_flag_offset > 0 {
+            let ts = trans_flag_offset as usize;
+            let te = ts.saturating_add(count as usize);
+            // Lenient: use what's available if the data is truncated.
+            data.get(ts..te).unwrap_or_else(|| {
+                data.get(ts..).unwrap_or(&[])
+            })
+        } else {
+            &[] as &[u8]
+        };
+
+        // ── Remap Data ──────────────────────────────────────────────────
+        // Remap tables live between remaps_offset and the next section.
+        // We bound the region using the next non-zero offset that follows
+        // remaps_offset in the file, or the end of the data blob.
+        let remap_data = if remaps_offset > 0 {
+            let rs = remaps_offset as usize;
+            // Candidate end boundaries: trans_flag, map, icons, file end.
+            let candidates = [
+                trans_flag_offset as usize,
+                map_offset as usize,
+                icons_offset as usize,
+                size as usize,
+                data.len(),
+            ];
+            let re = candidates
+                .iter()
+                .copied()
+                .filter(|&c| c > rs)
+                .min()
+                .unwrap_or(data.len());
+            // Lenient: use what's available.
+            data.get(rs..re).unwrap_or_else(|| {
+                data.get(rs..).unwrap_or(&[])
+            })
+        } else {
+            &[] as &[u8]
+        };
+
         // ── Tile Data ────────────────────────────────────────────────────
         // Use icons_offset if non-zero, otherwise tiles start right after
         // the header.
@@ -281,6 +339,8 @@ impl<'input> TdTmpFile<'input> {
             header,
             map_data,
             tiles,
+            trans_flags,
+            remap_data,
         })
     }
 }

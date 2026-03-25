@@ -83,13 +83,24 @@ pub struct CpsPalette {
 impl CpsPalette {
     /// Converts a single palette entry to 8-bit RGB.
     ///
-    /// Each 6-bit component is shifted left 2 bits, matching the original
-    /// VGA DAC programming (`buffer[i] = palette[i] << 2`).  The `& 0x3F`
-    /// mask handles any corrupt/mod values above 63 gracefully.
+    /// Each 6-bit component (0–63) is scaled to 8-bit (0–255) using the
+    /// standard VGA-to-true-color formula: `(v << 2) | (v >> 4)`.  This
+    /// maps 0→0 and 63→255 exactly.  The `& 0x3F` mask handles any
+    /// corrupt/mod values above 63 gracefully.
+    ///
+    /// This matches the scaling used by the VQA palette decoder for
+    /// cross-format consistency.
     #[inline]
     pub fn to_rgb8(&self, index: u8) -> (u8, u8, u8) {
         let (r, g, b) = self.colors[index as usize];
-        ((r & 0x3F) << 2, (g & 0x3F) << 2, (b & 0x3F) << 2)
+        let r6 = r & 0x3F;
+        let g6 = g & 0x3F;
+        let b6 = b & 0x3F;
+        (
+            (r6 << 2) | (r6 >> 4),
+            (g6 << 2) | (g6 >> 4),
+            (b6 << 2) | (b6 >> 4),
+        )
     }
 }
 

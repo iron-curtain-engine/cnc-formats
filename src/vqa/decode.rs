@@ -202,10 +202,10 @@ impl VqaDecodeState {
                     let decompressed = lcw::decompress(payload, 768)?;
                     self.set_palette(&decompressed);
                 }
-                b"VPT0" => {
+                b"VPT0" | b"VPTK" => {
                     vpt_data = Some(Cow::Borrowed(payload));
                 }
-                b"VPTZ" => {
+                b"VPTZ" | b"VPTD" => {
                     let decompressed = lcw::decompress(payload, MAX_VPT_SIZE)?;
                     vpt_data = Some(Cow::Owned(decompressed));
                 }
@@ -376,7 +376,7 @@ impl VqaDecodeState {
         data: &[u8],
     ) -> Result<Option<VqaFrame>, Error> {
         match fourcc {
-            b"VQFR" | b"VQFL" => self.decode_frame_chunk(data),
+            b"VQFR" | b"VQFK" | b"VQFL" => self.decode_frame_chunk(data),
             b"CBF0" => {
                 self.copy_codebook(data)?;
                 Ok(None)
@@ -415,7 +415,7 @@ impl VqaDecodeState {
         pixels: &mut [u8],
     ) -> Result<bool, Error> {
         match fourcc {
-            b"VQFR" | b"VQFL" => self.decode_frame_chunk_into(data, pixels),
+            b"VQFR" | b"VQFK" | b"VQFL" => self.decode_frame_chunk_into(data, pixels),
             b"CBF0" => {
                 self.copy_codebook(data)?;
                 Ok(false)

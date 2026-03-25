@@ -127,6 +127,11 @@ pub struct WsaFile<'a> {
     /// `offsets[num_frames + 1]` is non-zero (indicating data exists
     /// beyond the last normal frame).
     pub has_loop_frame: bool,
+    /// Compressed loop-back delta data (XOR delta from last frame back to
+    /// frame 0 for seamless looping).  Present when `has_loop_frame` is true.
+    /// Callers should LCW-decompress and XOR-apply this delta onto the last
+    /// decoded frame to produce a seamless loop-back to frame 0.
+    pub loop_frame: Option<WsaFrame<'a>>,
     /// Embedded 6-bit VGA palette (768 bytes), if `header.flags & 1` is set.
     pub palette: Option<&'a [u8]>,
 }
@@ -282,16 +287,33 @@ impl<'a> WsaFile<'a> {
             });
         }
 
-        // Check for loop frame: per EA WSA.CPP the loop-back delta lives at
-        // offsets[num_frames] and offsets[num_frames + 1] is the end-of-data
-        // sentinel.  A non-zero sentinel means loop delta data exists.
-        let loop_offset = offsets.get(fc.saturating_add(1)).copied().unwrap_or(0);
-        let has_loop_frame = loop_offset != 0;
+        // Check for loop frame: per the WSA spec the loop-back delta lives
+        // between offsets[num_frames] and offsets[num_frames + 1].  A non-zero
+        // sentinel at offsets[num_frames + 1] means loop delta data exists.
+        let loop_sentinel = offsets.get(fc.saturating_add(1)).copied().unwrap_or(0);
+        let has_loop_frame = loop_sentinel != 0;
+        let loop_frame = if has_loop_frame {
+            let loop_start_rel = offsets.get(fc).copied().unwrap_or(0) as usize;
+            let loop_end_rel = loop_sentinel as usize;
+            if loop_end_rel > loop_start_rel {
+                let abs_start = data_base.saturating_add(loop_start_rel);
+                let abs_end = data_base.saturating_add(loop_end_rel);
+                data.get(abs_start..abs_end).map(|d| WsaFrame {
+                    index: fc,
+                    data: d,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         Ok(WsaFile {
             header,
             frames,
             has_loop_frame,
+            loop_frame,
             palette,
         })
     }
@@ -301,6 +323,13 @@ impl<'a> WsaFile<'a> {
     /// WSA frames are LCW-compressed XOR-deltas applied sequentially:
     /// frame 0 is XOR'd against a zero-filled canvas, each subsequent
     /// frame is XOR'd against the previous frame's output.
+    ///
+    /// The decoder uses a size-based heuristic to distinguish between raw
+    /// XOR deltas (decompressed size == pixel count, used by community
+    /// tools and our encoder) and Format40 command streams (any other
+    /// size, used by the original game engine).  This maximises
+    /// compatibility with both original game files and community-created
+    /// WSA files.
     ///
     /// Returns one `Vec<u8>` per frame, each containing `width × height`
     /// palette-indexed pixels.
@@ -313,16 +342,40 @@ impl<'a> WsaFile<'a> {
         let mut canvas = vec![0u8; pixel_count];
         let mut decoded = Vec::with_capacity(self.frames.len());
 
+        // V38: cap LCW output.  Format40 command streams are typically
+        // smaller than pixel_count; raw XOR deltas equal pixel_count.
+        // Allow up to 2× pixel_count to handle both cases with headroom.
+        let max_lcw_output = pixel_count.saturating_mul(2).max(pixel_count);
+
         for frame in &self.frames {
             if frame.data.is_empty() {
                 // Empty frame: no delta, canvas unchanged.
                 decoded.push(canvas.clone());
                 continue;
             }
-            let delta = crate::lcw::decompress(frame.data, pixel_count)?;
-            // XOR the delta onto the running canvas.
-            for (dst, src) in canvas.iter_mut().zip(delta.iter()) {
-                *dst ^= *src;
+            let delta = crate::lcw::decompress(frame.data, max_lcw_output)?;
+
+            // Discriminate between raw XOR deltas and Format40 command
+            // streams using the decompressed size:
+            //
+            // - Raw XOR delta: exactly `pixel_count` bytes — one XOR byte
+            //   per pixel.  Used by our encoder and community tools.
+            // - Format40 command stream: any other length — typically
+            //   shorter than pixel_count (commands encode runs/skips
+            //   compactly).  Used by the original game engine.
+            //
+            // This heuristic is reliable because raw XOR deltas are always
+            // exactly pixel_count bytes, while Format40 streams are almost
+            // never exactly that length (they'd need a pathological input
+            // where command overhead exactly equals pixel_count).
+            if delta.len() == pixel_count {
+                // Raw XOR delta: byte-for-byte XOR.
+                for (dst, src) in canvas.iter_mut().zip(delta.iter()) {
+                    *dst ^= *src;
+                }
+            } else {
+                // Format40 command stream.
+                crate::xor_delta::apply_xor_delta(&mut canvas, &delta)?;
             }
             decoded.push(canvas.clone());
         }

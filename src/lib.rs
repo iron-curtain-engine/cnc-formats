@@ -150,6 +150,8 @@ pub mod w3d;
 /// Generals / Zero Hour WND UI layout parser (`.wnd`).
 pub mod wnd;
 pub mod wsa;
+/// Format40 XOR-delta decoder shared by SHP and WSA.
+pub mod xor_delta;
 
 #[cfg(feature = "miniyaml")]
 pub mod miniyaml;

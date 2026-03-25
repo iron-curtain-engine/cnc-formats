@@ -108,10 +108,10 @@ fn palette_to_rgb8() {
     colors[0] = (63, 0, 32);
     let pal = CpsPalette { colors };
     let (r, g, b) = pal.to_rgb8(0);
-    // 6-bit → 8-bit: value << 2  (matches VGA DAC and PAL conversion)
-    assert_eq!(r, 63 << 2); // 252
+    // 6-bit → 8-bit: (v << 2) | (v >> 4) for proper 0→0, 63→255 scaling.
+    assert_eq!(r, (63 << 2) | (63 >> 4)); // 255
     assert_eq!(g, 0);
-    assert_eq!(b, 32 << 2); // 128
+    assert_eq!(b, (32 << 2) | (32 >> 4)); // 130
 }
 
 // ── Error Paths ──────────────────────────────────────────────────────────────

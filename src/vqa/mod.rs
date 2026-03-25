@@ -138,9 +138,14 @@ pub struct VqaHeader {
 
 impl VqaHeader {
     /// Returns `true` if the file includes audio data.
+    ///
+    /// Checks both the VQHD flags field (bit 0 = `VQAHDF_AUDIO`, per the
+    /// canonical header spec) and the sample-rate/channel fields for
+    /// backward compatibility with files that have non-zero audio fields
+    /// but a clear flags bit.
     #[inline]
     pub fn has_audio(&self) -> bool {
-        self.freq > 0 && self.channels > 0
+        (self.flags & 1 != 0) || (self.freq > 0 && self.channels > 0)
     }
 
     /// Returns `true` if audio is stereo.

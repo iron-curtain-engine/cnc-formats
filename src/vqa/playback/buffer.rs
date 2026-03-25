@@ -142,12 +142,72 @@ impl<R: Read + Seek> VqaDecoder<R> {
         }
     }
 
+    /// Reads already-queued audio samples **without pumping further chunks**.
+    ///
+    /// This is the bounded-memory counterpart to [`Self::read_audio_samples`].
+    /// It consumes only audio that was decoded as a side-effect of prior
+    /// `next_frame` / `next_frame_into` calls, so the decoder never advances
+    /// past the current video position and no additional video frames are
+    /// buffered internally.
+    ///
+    /// Returns the number of interleaved `i16` samples written into `out`.
+    pub fn read_queued_audio_samples(&mut self, out: &mut [i16]) -> Result<usize, Error> {
+        if !self.has_audio() || out.is_empty() {
+            return Ok(0);
+        }
+
+        let channels = audio_channels_usize(self.audio_decoder.channels);
+        let target_len = out.len().saturating_sub(out.len() % channels);
+        let mut written = 0usize;
+
+        while written < target_len {
+            let mut front = match self.audio_queue.pop_front() {
+                Some(chunk) => chunk,
+                None => break, // no more queued audio — do NOT pump
+            };
+
+            if front.sample_frames(self.audio_decoder.channels) == 0 && front.is_drained() {
+                continue;
+            }
+
+            let out_len = out.len();
+            let dst = out
+                .get_mut(written..target_len)
+                .ok_or(Error::UnexpectedEof {
+                    needed: target_len,
+                    available: out_len,
+                })?;
+            let read = front.read_samples(&mut self.audio_decoder, dst)?;
+            let copied_frames = read / channels;
+            written = written.saturating_add(read);
+            self.audio_sample_frames_delivered = self
+                .audio_sample_frames_delivered
+                .saturating_add(copied_frames as u64);
+
+            if !front.is_drained() {
+                self.audio_queue.push_front(front);
+            } else if let Some(buf) = front.into_backing_buffer() {
+                recycle_audio_chunk_buffer(&mut self.audio_chunk_pool, buf);
+            }
+            if read == 0 {
+                break;
+            }
+        }
+
+        Ok(written)
+    }
+
     /// Reads as many decoded audio samples as fit in `out`.
     ///
     /// `out` is caller-owned scratch storage. The return value counts
     /// interleaved `i16` samples, matching [`crate::aud::AudStream::read_samples`].
     /// Downstream runtimes should consult [`Self::decoded_audio_sample_frames`]
     /// before the call when they need the exact starting timestamp.
+    ///
+    /// **Note:** this method calls `pump_once()` to obtain more audio when the
+    /// queue is empty, which as a side-effect decodes and internally buffers
+    /// every video frame encountered along the way.  For bounded-memory
+    /// playback, prefer [`Self::read_queued_audio_samples`].
     pub fn read_audio_samples(&mut self, out: &mut [i16]) -> Result<usize, Error> {
         if !self.has_audio() || out.is_empty() {
             return Ok(0);
