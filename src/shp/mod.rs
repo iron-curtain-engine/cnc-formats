@@ -394,11 +394,18 @@ impl<'input> ShpFile<'input> {
             offset: frame_count + 1,
             bound: entries.len(),
         })?;
-        // Same rationale: ref_offset/ref_format are not meaningful in the
-        // padding slot; only file_offset and format_byte must be zero.
-        if padding_entry.file_offset != 0 || padding_entry.format_byte != 0 {
+        // The padding entry's fields carry no meaningful data.  Some real
+        // Westwood-authored RA1 files have non-zero garbage in any field of
+        // this slot, so we only reject if the format_byte looks like a valid
+        // frame code (0x20 / 0x40 / 0x80), which would indicate a mis-parsed
+        // header rather than benign garbage.
+        let pad_fmt = padding_entry.format_byte;
+        if pad_fmt == ShpFrameFormat::Lcw as u8
+            || pad_fmt == ShpFrameFormat::XorLcw as u8
+            || pad_fmt == ShpFrameFormat::XorPrev as u8
+        {
             return Err(Error::InvalidMagic {
-                context: "SHP zero-padding entry",
+                context: "SHP zero-padding entry has frame format code",
             });
         }
 
@@ -491,26 +498,30 @@ impl<'input> ShpFile<'input> {
     ///
     /// - **Lcw (0x80) / `KF_KEYFRAME`:** LCW-decompress the data to produce a
     ///   standalone pixel buffer.
-    /// - **XorLcw (0x40) / `KF_KEYDELTA`:** Apply the **raw** (uncompressed)
-    ///   delta bytes as an XOR mask against the decoded reference keyframe
-    ///   (identified by [`ShpFrame::ref_offset`]).  The delta itself is not
-    ///   LCW-compressed — only the *reference* keyframe is.
-    /// - **XorPrev (0x20) / `KF_DELTA`:** Apply the **raw** (uncompressed)
-    ///   delta bytes as an XOR mask against the immediately preceding decoded
-    ///   frame.  No LCW decompression at all.
-    ///
-    /// Both XOR-delta types use raw byte streams, not LCW-compressed streams.
-    /// This matches the original Westwood engine (`2KEYFRAM.CPP`):
-    /// `KF_KEYDELTA` LCW-decompresses the *reference* frame, then XORs the
-    /// raw delta on top; `KF_DELTA` XORs the raw delta directly.
+    /// - **XorLcw (0x40) / `KF_KEYDELTA`:** Apply a **Format40-encoded**
+    ///   XOR-delta stream against the decoded reference keyframe (identified by
+    ///   [`ShpFrame::ref_offset`]).  The delta is a command stream, not raw
+    ///   bytes — see [`apply_xor_delta`] for the command encoding.
+    /// - **XorPrev (0x20) / `KF_DELTA`:** Apply a **Format40-encoded**
+    ///   XOR-delta stream against the immediately preceding decoded frame.
     ///
     /// # Errors
     ///
     /// - [`Error::DecompressionError`] if the first frame is not an LCW
-    ///   keyframe, if a reference frame cannot be found, or if LCW
-    ///   decompression of a keyframe fails.
+    ///   keyframe, if a reference frame cannot be found, if LCW
+    ///   decompression of a keyframe fails, or if a Format40 delta stream
+    ///   is malformed.
     pub fn decode_frames(&self) -> Result<Vec<Vec<u8>>, Error> {
         let pixel_count = self.frame_pixel_count();
+
+        // Degenerate SHP files (e.g. SIDEBAR.SHP from RA1's HIRES.MIX) carry
+        // width=0 / height=0 in the header, making pixel_count=0.  There is
+        // nothing useful to decompress; return one empty buffer per frame so
+        // callers that iterate frames do not crash.
+        if pixel_count == 0 {
+            return Ok(vec![vec![]; self.frames.len()]);
+        }
+
         let mut decoded: Vec<Vec<u8>> = Vec::with_capacity(self.frames.len());
         // Tracks which decoded-frame index corresponds to each keyframe's file
         // offset, so XorLcw frames can find their reference by `ref_offset`.
@@ -526,9 +537,9 @@ impl<'input> ShpFile<'input> {
                     decoded.push(pixels);
                 }
                 ShpFrameFormat::XorLcw => {
-                    // KF_KEYDELTA (0x40): raw XOR-delta against a reference keyframe.
-                    // The delta bytes are NOT LCW-compressed; look up the decoded
-                    // reference frame by file_offset (matching frame.ref_offset).
+                    // KF_KEYDELTA (0x40): Format40 XOR-delta against a reference keyframe.
+                    // Look up the decoded reference frame by file_offset
+                    // (matching frame.ref_offset).
                     if i == 0 {
                         return Err(Error::DecompressionError {
                             reason: "first frame must be an LCW keyframe, not XOR-delta",
@@ -542,14 +553,11 @@ impl<'input> ShpFile<'input> {
                         reason: "missing reference keyframe for XorLcw delta",
                     })?;
                     let mut pixels = base.clone();
-                    for (dst, src) in pixels.iter_mut().zip(frame.data.iter()) {
-                        *dst ^= *src;
-                    }
+                    apply_xor_delta(&mut pixels, frame.data)?;
                     decoded.push(pixels);
                 }
                 ShpFrameFormat::XorPrev => {
-                    // KF_DELTA (0x20): raw XOR-delta against the previous decoded frame.
-                    // The delta bytes are NOT LCW-compressed.
+                    // KF_DELTA (0x20): Format40 XOR-delta against the previous decoded frame.
                     if i == 0 {
                         return Err(Error::DecompressionError {
                             reason: "first frame must be an LCW keyframe, not XOR-delta",
@@ -559,9 +567,7 @@ impl<'input> ShpFile<'input> {
                         reason: "missing previous frame for XorPrev delta",
                     })?;
                     let mut pixels = prev.clone();
-                    for (dst, src) in pixels.iter_mut().zip(frame.data.iter()) {
-                        *dst ^= *src;
-                    }
+                    apply_xor_delta(&mut pixels, frame.data)?;
                     decoded.push(pixels);
                 }
             }
@@ -569,6 +575,121 @@ impl<'input> ShpFile<'input> {
 
         Ok(decoded)
     }
+}
+
+/// Apply a Format40-encoded XOR-delta stream to `dest`.
+///
+/// `dest` must already contain the reference frame pixels.  The delta stream
+/// encodes only the pixels that differ from the reference using a command
+/// language (Format40 / "XorLcw" / "XorPrev"):
+///
+/// | First byte | Meaning |
+/// |------------|---------|
+/// | `0x81`–`0xFF` | **Small skip** — advance dest by `cmd & 0x7F` pixels |
+/// | `0x80` + u16le `w` = 0 | **End of stream** |
+/// | `0x80` + u16le `w` (bits 15-14 = `00` or `01`) | **Big skip** — advance dest by `w` pixels |
+/// | `0x80` + u16le `w` (bits 15-14 = `10`) | **Big XOR** — read `w & 0x3FFF` bytes from stream, XOR each into dest |
+/// | `0x80` + u16le `w` (bits 15-14 = `11`) + byte `v` | **Big XOR value** — XOR `w & 0x3FFF` dest pixels with `v` |
+/// | `0x01`–`0x7F` | **Small XOR** — read `cmd` bytes from stream, XOR each into dest |
+/// | `0x00` + byte `n` + byte `v` | **Repeated XOR** — XOR `n` dest pixels with `v` |
+fn apply_xor_delta(dest: &mut [u8], delta: &[u8]) -> Result<(), Error> {
+    let mut di = 0usize; // dest index
+    let mut si = 0usize; // delta stream index
+
+    while si < delta.len() {
+        let cmd = delta[si];
+        si += 1;
+
+        if (cmd & 0x80) != 0 {
+            if cmd == 0x80 {
+                // Multi-byte command: read u16le word.
+                if si + 2 > delta.len() {
+                    return Err(Error::DecompressionError {
+                        reason: "Format40: truncated multi-byte command",
+                    });
+                }
+                let word = u16::from_le_bytes([delta[si], delta[si + 1]]) as usize;
+                si += 2;
+
+                if word == 0 {
+                    break; // end of stream
+                }
+
+                match (word >> 14) & 3 {
+                    0 | 1 => {
+                        // Big skip: advance dest by `word` pixels.
+                        di += word;
+                    }
+                    2 => {
+                        // Big XOR from stream.
+                        let count = word & 0x3FFF;
+                        if si + count > delta.len() || di + count > dest.len() {
+                            return Err(Error::DecompressionError {
+                                reason: "Format40: big XOR overruns buffer",
+                            });
+                        }
+                        for k in 0..count {
+                            dest[di + k] ^= delta[si + k];
+                        }
+                        di += count;
+                        si += count;
+                    }
+                    _ => {
+                        // Big XOR with single value.
+                        let count = word & 0x3FFF;
+                        if si >= delta.len() || di + count > dest.len() {
+                            return Err(Error::DecompressionError {
+                                reason: "Format40: big XOR value overruns buffer",
+                            });
+                        }
+                        let value = delta[si];
+                        si += 1;
+                        for k in 0..count {
+                            dest[di + k] ^= value;
+                        }
+                        di += count;
+                    }
+                }
+            } else {
+                // Small skip: cmd & 0x7F pixels.
+                di += (cmd & 0x7F) as usize;
+            }
+        } else if cmd == 0 {
+            // Repeated XOR: count + value.
+            if si + 2 > delta.len() {
+                return Err(Error::DecompressionError {
+                    reason: "Format40: truncated repeated XOR",
+                });
+            }
+            let count = delta[si] as usize;
+            let value = delta[si + 1];
+            si += 2;
+            if di + count > dest.len() {
+                return Err(Error::DecompressionError {
+                    reason: "Format40: repeated XOR overruns dest",
+                });
+            }
+            for k in 0..count {
+                dest[di + k] ^= value;
+            }
+            di += count;
+        } else {
+            // Small XOR from stream: count = cmd.
+            let count = cmd as usize;
+            if si + count > delta.len() || di + count > dest.len() {
+                return Err(Error::DecompressionError {
+                    reason: "Format40: small XOR overruns buffer",
+                });
+            }
+            for k in 0..count {
+                dest[di + k] ^= delta[si + k];
+            }
+            di += count;
+            si += count;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

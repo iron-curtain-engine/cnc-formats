@@ -81,11 +81,15 @@ pub struct CpsPalette {
 }
 
 impl CpsPalette {
-    /// Converts a single palette entry to 8-bit RGB by shifting left 2 bits.
+    /// Converts a single palette entry to 8-bit RGB.
+    ///
+    /// Each 6-bit component is shifted left 2 bits, matching the original
+    /// VGA DAC programming (`buffer[i] = palette[i] << 2`).  The `& 0x3F`
+    /// mask handles any corrupt/mod values above 63 gracefully.
     #[inline]
     pub fn to_rgb8(&self, index: u8) -> (u8, u8, u8) {
         let (r, g, b) = self.colors[index as usize];
-        (r << 2 | r >> 4, g << 2 | g >> 4, b << 2 | b >> 4)
+        ((r & 0x3F) << 2, (g & 0x3F) << 2, (b & 0x3F) << 2)
     }
 }
 

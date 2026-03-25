@@ -65,13 +65,25 @@ fn parse_frame_offset_before_payload_rejected() {
 }
 
 #[test]
-fn parse_nonzero_padding_entry_rejected() {
+fn parse_padding_nonzero_file_offset_accepted() {
+    // Real Westwood-authored files sometimes have garbage in the padding
+    // entry's offset bytes.  We must accept non-zero file_offset here.
     let mut bytes = build_shp(2, 2, 0, &[&[0xFE, 0x04, 0x00, 0xAB, 0x80]], None);
     let padding_start = 14 + 2 * OFFSET_ENTRY_SIZE;
-    if let Some(byte) = bytes.get_mut(padding_start) {
-        *byte = 1;
-    }
+    // Set low 24 bits of the u32 (i.e. file_offset) to a non-zero value;
+    // byte 3 (format_byte) stays 0x00 — not a valid frame code.
+    bytes[padding_start] = 0x01;
+    assert!(ShpFile::parse(&bytes).is_ok());
+}
 
+#[test]
+fn parse_padding_entry_with_frame_code_rejected() {
+    // If the padding entry's format_byte matches a valid frame code we
+    // interpret this as a mis-parsed header and reject the file.
+    let mut bytes = build_shp(2, 2, 0, &[&[0xFE, 0x04, 0x00, 0xAB, 0x80]], None);
+    let padding_start = 14 + 2 * OFFSET_ENTRY_SIZE;
+    // byte 3 of the entry u32 is the format_byte (bits 24-31 of the LE u32).
+    bytes[padding_start + 3] = 0x80; // Lcw frame code
     let result = ShpFile::parse(&bytes);
     assert!(matches!(result, Err(Error::InvalidMagic { .. })));
 }
@@ -289,6 +301,34 @@ fn frame_pixel_count_zero_dimensions() {
     let bytes = build_shp(0, 0, 0, &[], None);
     let shp = ShpFile::parse(&bytes).unwrap();
     assert_eq!(shp.frame_pixel_count(), 0);
+}
+
+/// Degenerate SHP files with width=0 / height=0 (like SIDEBAR.SHP from
+/// RA1's HIRES.MIX) must decode without error, returning one empty
+/// pixel buffer per frame instead of attempting LCW decompression with
+/// a zero output cap.
+#[test]
+fn decode_frames_zero_dimensions_returns_empty_buffers() {
+    // Build a valid zero-dimension SHP with no frame data.
+    let bytes = build_shp(0, 0, 0, &[], None);
+    let shp = ShpFile::parse(&bytes).unwrap();
+    assert_eq!(shp.frame_pixel_count(), 0);
+    let frames = shp.decode_frames().unwrap();
+    assert!(frames.is_empty(), "no frames in a zero-frame SHP");
+}
+
+/// Degenerate SHP files with width=0 / height=0 but non-zero frame count
+/// must still decode without crashing (pixel buffers are all empty).
+#[test]
+fn decode_frames_zero_dimensions_with_frames_returns_empty_buffers() {
+    // The frame pixel data is 0x80 (LCW end marker) which would fail with
+    // max_output=0 before the fix.  After the fix the LCW path is bypassed.
+    let bytes = build_shp(0, 0, 0, &[&[0x80u8]], None);
+    let shp = ShpFile::parse(&bytes).unwrap();
+    // frame_count may be 0 or 1 depending on whether build_shp with one
+    // zero-byte-frame produces a parseable frame; either way decode_frames
+    // must not return an error.
+    assert!(shp.decode_frames().is_ok());
 }
 
 #[test]

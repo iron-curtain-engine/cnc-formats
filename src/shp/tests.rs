@@ -256,21 +256,21 @@ fn decode_frames_zero_frames() {
 
 /// `decode_frames` correctly applies an XorPrev delta chain across two frames.
 ///
-/// Why: XorPrev (format 0x20 / KF_DELTA) frames store a raw (uncompressed)
+/// Why: XorPrev (format 0x20 / KF_DELTA) frames store a Format40-encoded
 /// XOR-delta that is applied directly to the previous frame's pixels.  A bug
 /// in the XOR application or frame ordering would silently corrupt every
 /// non-keyframe in unit animations.
 ///
 /// How: Frame 0 is an LCW keyframe with pixels [0xAA, 0xBB, 0xCC, 0xDD].
-/// Frame 1 is an XorPrev delta whose raw bytes are [0x11, 0x11, 0x11, 0x11].
+/// Frame 1 is an XorPrev delta (Format40 repeated-XOR: 4× 0x11).
 /// After XOR: frame 1 pixels = [0xAA^0x11, 0xBB^0x11, 0xCC^0x11, 0xDD^0x11]
 ///                            = [0xBB, 0xAA, 0xDD, 0xCC].
 #[test]
 fn decode_frames_xor_delta_chain() {
     // LCW literal command: 0x84 = literal 4 bytes, then 0x80 = end marker.
     let lcw_frame0: &[u8] = &[0x84, 0xAA, 0xBB, 0xCC, 0xDD, 0x80];
-    // XorPrev (0x20) stores raw XOR bytes — no LCW compression.
-    let lcw_delta1: &[u8] = &[0x11, 0x11, 0x11, 0x11];
+    // Format40 repeated-XOR: 0x00 = cmd, 0x04 = count, 0x11 = value.
+    let lcw_delta1: &[u8] = &[0x00, 0x04, 0x11];
 
     let width: u16 = 2;
     let height: u16 = 2;
@@ -333,24 +333,24 @@ fn decode_frames_xor_delta_chain() {
 /// `decode_frames` correctly applies XorLcw deltas against the reference keyframe,
 /// not the sequential previous frame.
 ///
-/// Why: XorLcw (0x40 / KF_KEYDELTA) stores a raw XOR-delta against the decoded
-/// reference keyframe identified by `ref_offset`.  CLOCK.SHP from LORES.MIX uses
-/// this pattern: odd frames are XorLcw, all referencing the same base keyframe
-/// (frame 0), so frame 3's XorLcw should XOR against frame 0, not frame 2.
-/// Passing the raw bytes to the LCW decoder produces `UnexpectedEof`; using the
-/// wrong (sequential) reference frame produces visually wrong pixels.
+/// Why: XorLcw (0x40 / KF_KEYDELTA) stores a Format40-encoded XOR-delta against
+/// the decoded reference keyframe identified by `ref_offset`.  CLOCK.SHP from
+/// LORES.MIX uses this pattern: odd frames are XorLcw, all referencing the same
+/// base keyframe (frame 0), so frame 3's XorLcw should XOR against frame 0, not
+/// frame 2.  Using the wrong (sequential) reference frame produces visually wrong
+/// pixels.
 ///
 /// How: Frame 0 is an LCW keyframe [0xAA, 0xBB, 0xCC, 0xDD].
-/// Frame 1 is XorLcw (delta=[0x11,0x11,0x11,0x11], ref=frame0) → [0xBB,0xAA,0xDD,0xCC].
-/// Frame 2 is XorLcw (delta=[0x44,0x44,0x44,0x44], ref=frame0) → [0xEE,0xFF,0x88,0x99].
+/// Frame 1 is XorLcw (Format40 4× 0x11, ref=frame0) → [0xBB,0xAA,0xDD,0xCC].
+/// Frame 2 is XorLcw (Format40 4× 0x44, ref=frame0) → [0xEE,0xFF,0x88,0x99].
 /// If frame 2 incorrectly used frame 1 as its base, it would produce [0xFF,0xEE,0x99,0x88].
 #[test]
 fn decode_frames_xorlcw_uses_reference_keyframe() {
     // LCW literal: 0x84 = 4 literal bytes, 0x80 = end.
     let lcw_frame0: &[u8] = &[0x84, 0xAA, 0xBB, 0xCC, 0xDD, 0x80];
-    // XorLcw raw deltas (not LCW — just raw XOR masks).
-    let raw_delta1: &[u8] = &[0x11, 0x11, 0x11, 0x11];
-    let raw_delta2: &[u8] = &[0x44, 0x44, 0x44, 0x44];
+    // Format40 repeated-XOR deltas: 0x00 = cmd, count, value.
+    let raw_delta1: &[u8] = &[0x00, 0x04, 0x11];
+    let raw_delta2: &[u8] = &[0x00, 0x04, 0x44];
 
     let width: u16 = 2;
     let height: u16 = 2;
@@ -418,4 +418,71 @@ fn decode_frames_xorlcw_uses_reference_keyframe() {
     assert_eq!(frames[1], vec![0xBB, 0xAA, 0xDD, 0xCC]);
     // Frame 2: frame0 XOR [0x44,0x44,0x44,0x44]  ← uses frame0 as ref, NOT frame1
     assert_eq!(frames[2], vec![0xEE, 0xFF, 0x88, 0x99]);
+}
+
+/// `apply_xor_delta` correctly handles all Format40 command types.
+///
+/// Why: The Format40 decoder has several command branches (small skip, small
+/// XOR from stream, repeated XOR, end marker).  A bug in any branch would
+/// silently corrupt the pixels it touches.
+///
+/// How: Frame 0 = [0x10, 0x20, 0x30, 0x40, 0x50] (1×5 LCW keyframe).
+/// Frame 1 XorPrev delta applies the following Format40 commands:
+///   - 0x81          → small skip 1 pixel         (pixel 0 unchanged)
+///   - 0x01 0xFF     → small XOR 1 byte 0xFF       (pixel 1: 0x20^0xFF=0xDF)
+///   - 0x00 0x02 0x0F→ repeated XOR 2× value 0x0F  (pixel 2: 0x3F, pixel 3: 0x4F)
+///   - 0x80 0x00 0x00→ end of stream               (pixel 4 unchanged)
+/// Expected frame 1: [0x10, 0xDF, 0x3F, 0x4F, 0x50].
+#[test]
+fn decode_frames_format40_command_types() {
+    // LCW literal: 0x85 = 5 literal bytes, 0x80 = LCW end.
+    let lcw_frame0: &[u8] = &[0x85, 0x10, 0x20, 0x30, 0x40, 0x50, 0x80];
+    // Format40 delta exercising: small skip, small XOR, repeated XOR, end marker.
+    let fmt40_delta: &[u8] = &[
+        0x81,               // small skip 1
+        0x01, 0xFF,         // small XOR from stream: 1 byte → pixel 1 ^= 0xFF
+        0x00, 0x02, 0x0F,   // repeated XOR: 2 pixels with 0x0F
+        0x80, 0x00, 0x00,   // end of stream
+    ];
+
+    let width: u16 = 1;
+    let height: u16 = 5;
+    let frame_count: u16 = 2;
+    let total_entries = frame_count as usize + EXTRA_OFFSET_ENTRIES;
+    let offset_table_size = total_entries * OFFSET_ENTRY_SIZE;
+    let data_start = (14 + offset_table_size) as u32;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&frame_count.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // x
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // y
+    bytes.extend_from_slice(&width.to_le_bytes());
+    bytes.extend_from_slice(&height.to_le_bytes());
+    bytes.extend_from_slice(&(lcw_frame0.len() as u16).to_le_bytes()); // largest
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // flags
+
+    let raw0 = ((ShpFrameFormat::Lcw as u32) << 24) | (data_start & OFFSET_MASK);
+    bytes.extend_from_slice(&raw0.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+
+    let frame1_off = data_start + lcw_frame0.len() as u32;
+    let raw1 = ((ShpFrameFormat::XorPrev as u32) << 24) | (frame1_off & OFFSET_MASK);
+    bytes.extend_from_slice(&raw1.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+
+    let eof_off = frame1_off + fmt40_delta.len() as u32;
+    bytes.extend_from_slice(&(eof_off & OFFSET_MASK).to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 8]); // padding entry
+
+    bytes.extend_from_slice(lcw_frame0);
+    bytes.extend_from_slice(fmt40_delta);
+
+    let shp = ShpFile::parse(&bytes).unwrap();
+    let frames = shp.decode_frames().unwrap();
+    assert_eq!(frames[0], vec![0x10, 0x20, 0x30, 0x40, 0x50]);
+    assert_eq!(frames[1], vec![0x10, 0xDF, 0x3F, 0x4F, 0x50]);
 }
