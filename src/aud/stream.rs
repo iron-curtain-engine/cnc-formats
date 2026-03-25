@@ -93,7 +93,7 @@ pub struct AudStream<R> {
     right: AdpcmChannel,
     next_adpcm_left: bool,
     pending_sample: Option<i16>,
-    scomp99_chunk_remaining: usize,
+    chunk_remaining: usize,
 }
 
 impl<R: Read> AudStream<R> {
@@ -138,7 +138,7 @@ impl<R: Read> AudStream<R> {
             right: AdpcmChannel::default(),
             next_adpcm_left: true,
             pending_sample: None,
-            scomp99_chunk_remaining: 0,
+            chunk_remaining: 0,
         }
     }
 
@@ -349,7 +349,7 @@ impl<R: Read> AudStream<R> {
         self.right = AdpcmChannel::default();
         self.next_adpcm_left = true;
         self.pending_sample = None;
-        self.scomp99_chunk_remaining = 0;
+        self.chunk_remaining = 0;
     }
 
     #[inline]
@@ -386,19 +386,63 @@ impl<R: Read> AudStream<R> {
 
     #[inline]
     fn next_adpcm_byte(&mut self) -> Result<Option<u8>, Error> {
-        if self.header.compression == SCOMP_SOS {
-            return self.next_scomp99_byte();
+        match self.header.compression {
+            SCOMP_SOS => self.next_scomp99_byte(),
+            SCOMP_WESTWOOD => self.next_westwood_chunk_byte(),
+            _ => self.next_payload_byte(),
         }
-        self.next_payload_byte()
+    }
+
+    /// Reads one ADPCM byte from a Westwood-framed (SCOMP=1) chunk stream.
+    ///
+    /// Each chunk has a 4-byte header: `u16 compressed_size` + `u16 uncompressed_size`.
+    /// No magic number is present (unlike SCOMP=99 which uses `0x0000DEAF`).
+    fn next_westwood_chunk_byte(&mut self) -> Result<Option<u8>, Error> {
+        loop {
+            if self.chunk_remaining > 0 {
+                let [byte] =
+                    read_exact_array::<_, 1>(&mut self.reader, "reading AUD chunk payload")?;
+                self.remaining_payload = self.remaining_payload.saturating_sub(1);
+                self.chunk_remaining = self.chunk_remaining.saturating_sub(1);
+                return Ok(Some(byte));
+            }
+
+            if self.remaining_payload == 0 {
+                return Ok(None);
+            }
+
+            if self.remaining_payload < 4 {
+                return Err(Error::UnexpectedEof {
+                    needed: 4,
+                    available: self.remaining_payload,
+                });
+            }
+
+            let header =
+                read_exact_array::<_, 4>(&mut self.reader, "reading AUD Westwood chunk header")?;
+            self.remaining_payload = self.remaining_payload.saturating_sub(4);
+            let [c0, c1, _, _] = header;
+            let compressed_size = u16::from_le_bytes([c0, c1]) as usize;
+
+            if compressed_size > self.remaining_payload {
+                return Err(Error::UnexpectedEof {
+                    needed: compressed_size,
+                    available: self.remaining_payload,
+                });
+            }
+
+            self.chunk_remaining = compressed_size;
+            // Empty chunk — loop to read the next header.
+        }
     }
 
     fn next_scomp99_byte(&mut self) -> Result<Option<u8>, Error> {
         loop {
-            if self.scomp99_chunk_remaining > 0 {
+            if self.chunk_remaining > 0 {
                 let [byte] =
                     read_exact_array::<_, 1>(&mut self.reader, "reading AUD chunk payload")?;
                 self.remaining_payload = self.remaining_payload.saturating_sub(1);
-                self.scomp99_chunk_remaining = self.scomp99_chunk_remaining.saturating_sub(1);
+                self.chunk_remaining = self.chunk_remaining.saturating_sub(1);
                 return Ok(Some(byte));
             }
 
@@ -431,7 +475,7 @@ impl<R: Read> AudStream<R> {
                 });
             }
 
-            self.scomp99_chunk_remaining = compressed_size;
+            self.chunk_remaining = compressed_size;
         }
     }
 
@@ -498,9 +542,9 @@ impl<R: Read + Seek> AudStream<R> {
     /// Returns `true` if a valid chunk header was found, `false` if the scan
     /// limit was reached without finding one.
     ///
-    /// This method is only useful for SCOMP=99 (SOS) streams that use chunked
-    /// framing. For flat ADPCM streams (SCOMP_WESTWOOD), there are no sync
-    /// markers and this method always returns `false`.
+    /// This method is only useful for SCOMP=99 (SOS) streams.  SCOMP=1
+    /// (Westwood) also uses chunk framing but has no magic marker, so
+    /// resync is not possible and this method returns `false` for it.
     pub fn try_resync(&mut self) -> Result<bool, Error> {
         if self.header.compression != SCOMP_SOS {
             return Ok(false);
@@ -541,7 +585,7 @@ impl<R: Read + Seek> AudStream<R> {
                 self.right = AdpcmChannel::default();
                 self.next_adpcm_left = true;
                 self.pending_sample = None;
-                self.scomp99_chunk_remaining = 0;
+                self.chunk_remaining = 0;
 
                 return Ok(true);
             }

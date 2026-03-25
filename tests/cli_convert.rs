@@ -152,13 +152,23 @@ fn convert_aud_to_wav_streams_to_output_file() {
     let samples = [0i16, 200, -200, 400, -400, 0];
     let compressed = encode_adpcm(&samples, false);
 
+    // SCOMP_WESTWOOD payload: each chunk starts with a 4-byte header
+    // (u16 compressed_size, u16 uncompressed_size) before the ADPCM bytes.
+    let chunk_compressed = compressed.len() as u16;
+    let chunk_uncompressed = (samples.len() * 2) as u16;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&chunk_compressed.to_le_bytes());
+    payload.extend_from_slice(&chunk_uncompressed.to_le_bytes());
+    payload.extend_from_slice(&compressed);
+
     let mut aud = Vec::new();
     aud.extend_from_slice(&22050u16.to_le_bytes());
-    aud.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+    // compressed_size in the file header includes the 4-byte chunk header.
+    aud.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     aud.extend_from_slice(&((samples.len() * 2) as u32).to_le_bytes());
     aud.push(AUD_FLAG_16BIT);
     aud.push(SCOMP_WESTWOOD);
-    aud.extend_from_slice(&compressed);
+    aud.extend_from_slice(&payload);
 
     let input = temp_file("stream_convert.aud", &aud);
     let output = std::env::temp_dir()

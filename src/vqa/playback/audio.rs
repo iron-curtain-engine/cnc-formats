@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025–present Iron Curtain contributors
 
-use super::super::snd::VqaAudioChunkDecoder;
+use super::super::snd::{decode_snd2_chunk_stateful, VqaAudioChunkDecoder};
 use super::super::VqaHeader;
 use super::VqaAudioChunk;
 use crate::error::Error;
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
 #[derive(Debug)]
@@ -27,16 +28,10 @@ impl VqaQueuedAudio {
 
     pub(super) fn read_samples(
         &mut self,
-        audio: &mut VqaAudioDecodeState,
+        audio: &VqaAudioDecodeState,
         out: &mut [i16],
     ) -> Result<usize, Error> {
-        let written = self.decoder.read_samples(
-            out,
-            &mut audio.left_sample,
-            &mut audio.left_index,
-            &mut audio.right_sample,
-            &mut audio.right_index,
-        )?;
+        let written = self.decoder.read_samples(out)?;
         self.start_sample_frame = self
             .start_sample_frame
             .saturating_add((written / audio_channels_usize(audio.channels)) as u64);
@@ -45,7 +40,7 @@ impl VqaQueuedAudio {
 
     pub(super) fn into_audio_chunk(
         mut self,
-        audio: &mut VqaAudioDecodeState,
+        audio: &VqaAudioDecodeState,
     ) -> Result<(Option<VqaAudioChunk>, Option<Vec<u8>>), Error> {
         let sample_count = self.decoder.remaining_sample_count();
         if sample_count == 0 {
@@ -84,10 +79,14 @@ pub(super) struct VqaAudioDecodeState {
     pub(super) channels: u8,
     bits: u8,
     next_start_sample_frame: u64,
-    left_sample: i32,
-    left_index: usize,
-    right_sample: i32,
-    right_index: usize,
+    /// IMA ADPCM left-channel sample state, carried across SND2 chunk boundaries.
+    ima_l_sample: i32,
+    /// IMA ADPCM left-channel step-index state, carried across SND2 chunk boundaries.
+    ima_l_index: usize,
+    /// IMA ADPCM right-channel sample state, carried across SND2 chunk boundaries.
+    ima_r_sample: i32,
+    /// IMA ADPCM right-channel step-index state, carried across SND2 chunk boundaries.
+    ima_r_index: usize,
 }
 
 impl VqaAudioDecodeState {
@@ -102,10 +101,10 @@ impl VqaAudioDecodeState {
             },
             bits: header.bits,
             next_start_sample_frame: 0,
-            left_sample: 0,
-            left_index: 0,
-            right_sample: 0,
-            right_index: 0,
+            ima_l_sample: 0,
+            ima_l_index: 0,
+            ima_r_sample: 0,
+            ima_r_index: 0,
         }
     }
 
@@ -116,6 +115,43 @@ impl VqaAudioDecodeState {
     ) -> Result<(Option<VqaQueuedAudio>, Option<Vec<u8>>), Error> {
         if !self.has_audio {
             return Ok((None, Some(data)));
+        }
+
+        // SND2 (IMA ADPCM): decode directly, carrying state across chunk boundaries.
+        if fourcc == b"SND2" {
+            let stereo = self.channels >= 2;
+            let pcm = decode_snd2_chunk_stateful(
+                &data,
+                stereo,
+                &mut self.ima_l_sample,
+                &mut self.ima_l_index,
+                &mut self.ima_r_sample,
+                &mut self.ima_r_index,
+            );
+            // Recycle the raw compressed buffer back to the caller.
+            let backing = Some(data);
+            let sample_count = pcm.len();
+            let sample_frames = sample_count / audio_channels_usize(self.channels);
+            if sample_frames == 0 {
+                return Ok((None, backing));
+            }
+            // Pack decoded PCM into bytes for Snd0Pcm16.
+            let mut bytes = Vec::with_capacity(sample_count * 2);
+            for s in &pcm {
+                bytes.extend_from_slice(&s.to_le_bytes());
+            }
+            let decoder = VqaAudioChunkDecoder::Snd0Pcm16 {
+                data: Cow::Owned(bytes),
+                pos: 0,
+            };
+            let chunk = VqaQueuedAudio {
+                start_sample_frame: self.next_start_sample_frame,
+                decoder,
+            };
+            self.next_start_sample_frame = self
+                .next_start_sample_frame
+                .saturating_add(sample_frames as u64);
+            return Ok((Some(chunk), backing));
         }
 
         let decoder =

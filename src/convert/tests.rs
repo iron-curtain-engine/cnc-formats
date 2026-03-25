@@ -426,22 +426,28 @@ fn aud_scomp99_chunk_headers_stripped() {
     }
 }
 
-/// SCOMP=1 AUD (Westwood ADPCM, no chunk headers) still decodes correctly.
+/// SCOMP=1 AUD (Westwood ADPCM) correctly strips the 4-byte per-chunk header.
 ///
-/// Why: the chunk-header stripping must only apply to SCOMP=99.  SCOMP=1
-/// files have raw ADPCM data without 0xDEAF wrappers.  If the stripper
-/// accidentally runs on SCOMP=1, it would corrupt the audio.
+/// Why: SCOMP=1 files use Westwood chunk framing (u16 compressed_size +
+/// u16 uncompressed_size) before each ADPCM payload.  If the header bytes
+/// are fed to the ADPCM decoder the output will be garbage.  This test
+/// verifies the header is stripped and silence decodes to near-zero samples.
 #[test]
-fn aud_scomp1_no_chunk_stripping() {
-    // Build a SCOMP=1 AUD with raw ADPCM silence.
-    let adpcm = [0u8; 8]; // 8 bytes = 16 samples of silence
+fn aud_scomp1_strips_chunk_headers() {
+    let adpcm = [0u8; 8]; // 8 bytes → 16 samples of silence
+    // Wrap in a Westwood 4-byte chunk header.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(adpcm.len() as u16).to_le_bytes()); // compressed_size
+    payload.extend_from_slice(&32u16.to_le_bytes()); // uncompressed_size (16 samples × 2 bytes)
+    payload.extend_from_slice(&adpcm);
+
     let mut aud_bytes = Vec::new();
     aud_bytes.extend_from_slice(&22050u16.to_le_bytes());
-    aud_bytes.extend_from_slice(&(adpcm.len() as u32).to_le_bytes());
+    aud_bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     aud_bytes.extend_from_slice(&32u32.to_le_bytes());
     aud_bytes.push(AUD_FLAG_16BIT);
-    aud_bytes.push(SCOMP_WESTWOOD); // compression: Westwood ADPCM (ID 1)
-    aud_bytes.extend_from_slice(&adpcm);
+    aud_bytes.push(SCOMP_WESTWOOD);
+    aud_bytes.extend_from_slice(&payload);
 
     let aud = AudFile::parse(&aud_bytes).unwrap();
     let wav = aud_to_wav(&aud).unwrap();
@@ -449,25 +455,31 @@ fn aud_scomp1_no_chunk_stripping() {
 
     let reader = hound::WavReader::new(std::io::Cursor::new(&wav)).unwrap();
     let samples: Vec<i16> = reader.into_samples::<i16>().map(|s| s.unwrap()).collect();
-    assert!(!samples.is_empty());
+    assert!(!samples.is_empty(), "WAV should contain decoded samples");
     for (i, &s) in samples.iter().enumerate() {
         assert!(
             s.abs() < 50,
-            "sample {i} = {s}: SCOMP=1 silence should decode to near-zero"
+            "sample {i} = {s}: SCOMP=1 silence should decode to near-zero (header byte leaked)"
         );
     }
 }
 
 #[test]
 fn aud_reader_to_wav_matches_buffered_conversion() {
-    let adpcm = [0x07u8, 0x70, 0x11, 0x88];
+    let raw_adpcm = [0x07u8, 0x70, 0x11, 0x88]; // 4 bytes → 8 samples
+    // Wrap in a Westwood 4-byte chunk header.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(raw_adpcm.len() as u16).to_le_bytes());
+    payload.extend_from_slice(&16u16.to_le_bytes()); // 8 samples × 2 bytes
+    payload.extend_from_slice(&raw_adpcm);
+
     let mut aud_bytes = Vec::new();
     aud_bytes.extend_from_slice(&22050u16.to_le_bytes());
-    aud_bytes.extend_from_slice(&(adpcm.len() as u32).to_le_bytes());
+    aud_bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     aud_bytes.extend_from_slice(&16u32.to_le_bytes());
     aud_bytes.push(AUD_FLAG_16BIT);
     aud_bytes.push(SCOMP_WESTWOOD);
-    aud_bytes.extend_from_slice(&adpcm);
+    aud_bytes.extend_from_slice(&payload);
 
     let aud = AudFile::parse(&aud_bytes).unwrap();
     let expected = aud_to_wav(&aud).unwrap();

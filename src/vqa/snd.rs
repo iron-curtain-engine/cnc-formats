@@ -14,6 +14,73 @@ use crate::error::Error;
 use crate::read::read_u16_le;
 use std::borrow::Cow;
 
+/// Decodes a single SND2 (IMA ADPCM) chunk into signed 16-bit PCM samples,
+/// carrying IMA state across calls.
+///
+/// Per the VQA spec, IMA ADPCM state **carries across chunk boundaries**.
+/// The caller is responsible for initialising state to `(0, 0, 0, 0)` at the
+/// start of the stream and passing the same mutable references for every
+/// subsequent chunk.
+///
+/// Stereo layout: the first half of the data is the left channel; the second
+/// half is the right channel.  For mono, only `l_sample`/`l_index` are used;
+/// `r_sample`/`r_index` are ignored.
+/// The returned samples are interleaved: L0, R0, L1, R1, …
+pub(super) fn decode_snd2_chunk_stateful(
+    data: &[u8],
+    stereo: bool,
+    l_sample: &mut i32,
+    l_index: &mut usize,
+    r_sample: &mut i32,
+    r_index: &mut usize,
+) -> Vec<i16> {
+    if stereo {
+        let half = data.len() / 2;
+        let left_data = data.get(..half).unwrap_or(&[]);
+        let right_data = data.get(half..).unwrap_or(&[]);
+
+        let mut left_pcm: Vec<i16> = Vec::with_capacity(left_data.len() * 2);
+        for &byte in left_data {
+            left_pcm.push(ima_decode_nibble(byte & 0x0F, l_sample, l_index));
+            left_pcm.push(ima_decode_nibble(byte >> 4, l_sample, l_index));
+        }
+
+        let mut right_pcm: Vec<i16> = Vec::with_capacity(right_data.len() * 2);
+        for &byte in right_data {
+            right_pcm.push(ima_decode_nibble(byte & 0x0F, r_sample, r_index));
+            right_pcm.push(ima_decode_nibble(byte >> 4, r_sample, r_index));
+        }
+
+        // Interleave L/R.
+        let n = left_pcm.len().min(right_pcm.len());
+        let mut out = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            out.push(left_pcm[i]);
+            out.push(right_pcm[i]);
+        }
+        out
+    } else {
+        let mut out = Vec::with_capacity(data.len() * 2);
+        for &byte in data {
+            out.push(ima_decode_nibble(byte & 0x0F, l_sample, l_index));
+            out.push(ima_decode_nibble(byte >> 4, l_sample, l_index));
+        }
+        out
+    }
+}
+
+/// Decodes a single SND2 (IMA ADPCM) chunk into signed 16-bit PCM samples.
+///
+/// This is a convenience wrapper that starts from fresh IMA state `(0, 0)`.
+/// Use [`decode_snd2_chunk_stateful`] to carry state across chunk boundaries.
+fn decode_snd2_chunk(data: &[u8], stereo: bool) -> Vec<i16> {
+    let mut ls: i32 = 0;
+    let mut li: usize = 0;
+    let mut rs: i32 = 0;
+    let mut ri: usize = 0;
+    decode_snd2_chunk_stateful(data, stereo, &mut ls, &mut li, &mut rs, &mut ri)
+}
+
 /// V38: maximum decompressed audio chunk size (1 MB).  Half a second of
 /// 44.1kHz stereo 16-bit = ~176 KB; 1 MB is very generous.
 const MAX_AUDIO_CHUNK_SIZE: usize = 1024 * 1024;
@@ -63,12 +130,6 @@ pub(super) enum VqaAudioChunkDecoder<'data> {
         cur_sample: i16,
         mode: Snd1Mode,
     },
-    Snd2 {
-        data: Cow<'data, [u8]>,
-        pos: usize,
-        stereo: bool,
-        pending_sample: Option<i16>,
-    },
 }
 
 impl VqaAudioChunkDecoder<'_> {
@@ -96,12 +157,19 @@ impl VqaAudioChunkDecoder<'_> {
                 }
             }
             b"SND1" => Ok(Some(Self::open_snd1(data)?)),
-            b"SND2" => Ok(Some(VqaAudioChunkDecoder::Snd2 {
-                data,
-                pos: 0,
-                stereo,
-                pending_sample: None,
-            })),
+            b"SND2" => {
+                // Decode the entire IMA ADPCM chunk upfront.
+                // State resets to (0, 0) per chunk; stereo uses split-half layout.
+                let pcm = decode_snd2_chunk(data.as_ref(), stereo);
+                let mut bytes = Vec::with_capacity(pcm.len() * 2);
+                for s in pcm {
+                    bytes.extend_from_slice(&s.to_le_bytes());
+                }
+                Ok(Some(VqaAudioChunkDecoder::Snd0Pcm16 {
+                    data: Cow::Owned(bytes),
+                    pos: 0,
+                }))
+            }
             _ => Ok(None),
         }
     }
@@ -169,12 +237,6 @@ impl VqaAudioChunkDecoder<'_> {
                 mode,
                 ..
             } => *remaining_output == 0 && matches!(mode, Snd1Mode::Idle),
-            Self::Snd2 {
-                data,
-                pos,
-                pending_sample,
-                ..
-            } => *pos >= data.len() && pending_sample.is_none(),
         }
     }
 
@@ -185,26 +247,12 @@ impl VqaAudioChunkDecoder<'_> {
             Self::Snd1 {
                 remaining_output, ..
             } => *remaining_output,
-            Self::Snd2 {
-                data,
-                pos,
-                pending_sample,
-                ..
-            } => data
-                .len()
-                .saturating_sub(*pos)
-                .saturating_mul(2)
-                .saturating_add(usize::from(pending_sample.is_some())),
         }
     }
 
     pub(super) fn read_samples(
         &mut self,
         out: &mut [i16],
-        left_sample: &mut i32,
-        left_index: &mut usize,
-        right_sample: &mut i32,
-        right_index: &mut usize,
     ) -> Result<usize, Error> {
         match self {
             Self::Snd0Pcm16 { data, pos } => read_snd0_pcm16(data, pos, out),
@@ -225,22 +273,6 @@ impl VqaAudioChunkDecoder<'_> {
                 mode,
                 out,
             ),
-            Self::Snd2 {
-                data,
-                pos,
-                stereo,
-                pending_sample,
-            } => read_snd2_samples(
-                data,
-                pos,
-                *stereo,
-                pending_sample,
-                out,
-                left_sample,
-                left_index,
-                right_sample,
-                right_index,
-            ),
         }
     }
 
@@ -248,8 +280,7 @@ impl VqaAudioChunkDecoder<'_> {
         match self {
             Self::Snd0Pcm16 { data, .. }
             | Self::Snd0Pcm8 { data, .. }
-            | Self::Snd1 { data, .. }
-            | Self::Snd2 { data, .. } => match data {
+            | Self::Snd1 { data, .. } => match data {
                 Cow::Owned(data) => Some(data),
                 Cow::Borrowed(_) => None,
             },
@@ -486,65 +517,6 @@ fn read_snd1_samples(
                     *mode = Snd1Mode::Idle;
                 }
             }
-        }
-    }
-
-    Ok(written)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn read_snd2_samples(
-    data: &[u8],
-    pos: &mut usize,
-    stereo: bool,
-    pending_sample: &mut Option<i16>,
-    out: &mut [i16],
-    left_sample: &mut i32,
-    left_index: &mut usize,
-    right_sample: &mut i32,
-    right_index: &mut usize,
-) -> Result<usize, Error> {
-    let mut written = 0usize;
-    let out_len = out.len();
-
-    while written < out.len() {
-        if let Some(sample) = pending_sample.take() {
-            let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
-                needed: written.saturating_add(1),
-                available: out_len,
-            })?;
-            *slot = sample;
-            written = written.saturating_add(1);
-            continue;
-        }
-
-        let byte_index = *pos;
-        let byte = match data.get(byte_index).copied() {
-            Some(byte) => byte,
-            None => break,
-        };
-        *pos = pos.saturating_add(1);
-
-        let (sample, index) = if stereo && byte_index % 2 != 0 {
-            (right_sample as &mut i32, right_index as &mut usize)
-        } else {
-            (left_sample as &mut i32, left_index as &mut usize)
-        };
-        let low = ima_decode_nibble(byte & 0x0F, sample, index);
-        let high = ima_decode_nibble(byte >> 4, sample, index);
-
-        let slot = out.get_mut(written).ok_or(Error::UnexpectedEof {
-            needed: written.saturating_add(1),
-            available: out_len,
-        })?;
-        *slot = low;
-        written = written.saturating_add(1);
-
-        if let Some(slot) = out.get_mut(written) {
-            *slot = high;
-            written = written.saturating_add(1);
-        } else {
-            *pending_sample = Some(high);
         }
     }
 

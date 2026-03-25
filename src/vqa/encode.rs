@@ -279,8 +279,8 @@ pub fn encode_vqa<T: AsRef<[u8]>>(
     out.extend_from_slice(&[0u8; 14]);
 
     // ── FINF (frame index placeholder) ───────────────────────────────
-    // FINF has 4 bytes per frame, storing raw u32 offsets.  We'll write
-    // placeholder zeros and patch after writing frame chunks.
+    // FINF has 4 bytes per frame, storing word offsets (byte_offset / 2).
+    // We write placeholder zeros and patch them after writing frame chunks.
     out.extend_from_slice(b"FINF");
     let finf_data_size = (num_frames as usize).saturating_mul(4);
     write_u32_be(&mut out, finf_data_size as u32);
@@ -289,10 +289,9 @@ pub fn encode_vqa<T: AsRef<[u8]>>(
 
     // ── Frame and audio chunks ───────────────────────────────────────
     for (frame_idx, vqfr_data) in frame_data_list.iter().enumerate() {
-        // Record frame offset for FINF (offset from start of FORM data, i.e.
-        // from byte 8 of the file; divided by 2 per VQA convention, but we
-        // store raw offset for version 2).
-        let frame_offset = out.len() as u32;
+        // FINF stores word offsets (byte_offset / 2) per the VQA spec.
+        // Frames are always chunk-aligned so out.len() is even here.
+        let frame_offset = (out.len() / 2) as u32;
         let finf_entry_pos = finf_data_start.saturating_add(frame_idx.saturating_mul(4));
         if let Some(slot) = out.get_mut(finf_entry_pos..finf_entry_pos.saturating_add(4)) {
             slot.copy_from_slice(&frame_offset.to_le_bytes());
@@ -504,6 +503,8 @@ fn build_vpt(pixels: &[u8], codebook: &[u8], width: usize, geo: &BlockGeometry) 
 /// Distributes PCM audio samples across frames as IMA ADPCM chunks.
 ///
 /// Evenly divides samples among `num_frames` chunks, then IMA-encodes each.
+/// IMA ADPCM encoder state is carried across chunk boundaries so that the
+/// decoder can reconstruct a contiguous stream without resets.
 fn encode_audio_chunks(samples: &[i16], stereo: bool, num_frames: usize) -> Vec<Vec<u8>> {
     if num_frames == 0 || samples.is_empty() {
         return Vec::new();
@@ -517,6 +518,12 @@ fn encode_audio_chunks(samples: &[i16], stereo: bool, num_frames: usize) -> Vec<
     let mut chunks = Vec::with_capacity(num_frames);
     let mut pos: usize = 0;
 
+    // Carry IMA encoder state across chunk boundaries.
+    let mut l_sample: i32 = 0;
+    let mut l_index: usize = 0;
+    let mut r_sample: i32 = 0;
+    let mut r_index: usize = 0;
+
     for frame_idx in 0..num_frames {
         let chunk_len = if frame_idx == num_frames - 1 {
             // Last frame gets all remaining samples.
@@ -527,7 +534,14 @@ fn encode_audio_chunks(samples: &[i16], stereo: bool, num_frames: usize) -> Vec<
         let chunk_samples = samples
             .get(pos..pos.saturating_add(chunk_len))
             .unwrap_or(&[]);
-        let encoded = aud::encode_adpcm(chunk_samples, stereo);
+        let encoded = aud::encode_adpcm_stateful(
+            chunk_samples,
+            stereo,
+            &mut l_sample,
+            &mut l_index,
+            &mut r_sample,
+            &mut r_index,
+        );
         chunks.push(encoded);
         pos = pos.saturating_add(chunk_len);
     }

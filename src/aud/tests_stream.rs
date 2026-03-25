@@ -7,6 +7,18 @@ use super::*;
 use std::io::Cursor;
 use std::time::Duration;
 
+/// Wraps raw ADPCM bytes in a Westwood 4-byte per-chunk frame header.
+///
+/// The header layout: `u16 compressed_size` + `u16 uncompressed_size`.
+/// `num_samples` is the count of `i16` PCM samples the chunk expands to.
+fn make_westwood_payload(adpcm: &[u8], num_samples: u16) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(4 + adpcm.len());
+    payload.extend_from_slice(&(adpcm.len() as u16).to_le_bytes());
+    payload.extend_from_slice(&num_samples.saturating_mul(2).to_le_bytes());
+    payload.extend_from_slice(adpcm);
+    payload
+}
+
 /// `AudStream::open` reads header fields and exposes them through `header()` and `media_info()`.
 ///
 /// Verifies that sample rate, channel count, compressed size, uncompressed size, sample frame
@@ -35,17 +47,19 @@ fn stream_open_reads_header() {
 /// the batch decoder.
 #[test]
 fn stream_matches_buffered_adpcm_decode() {
-    let compressed = [0x07u8, 0x70, 0x11, 0x88];
+    let raw_adpcm = [0x07u8, 0x70, 0x11, 0x88];
+    // 4 bytes × 2 nibbles = 8 mono samples.
+    let payload = make_westwood_payload(&raw_adpcm, 8);
     let mut bytes = make_header_bytes(
         22050,
-        compressed.len() as u32,
+        payload.len() as u32,
         16,
         AUD_FLAG_16BIT,
         SCOMP_WESTWOOD,
     );
-    bytes.extend_from_slice(&compressed);
+    bytes.extend_from_slice(&payload);
 
-    let expected = decode_adpcm(&compressed, false, 8);
+    let expected = decode_adpcm(&raw_adpcm, false, 8);
     let mut stream = AudStream::open(Cursor::new(bytes)).unwrap();
     let mut decoded = Vec::new();
     let mut chunk = [0i16; 3];
@@ -79,6 +93,45 @@ fn stream_scomp99_strips_chunk_headers() {
     }
 
     let mut bytes = make_header_bytes(22050, payload.len() as u32, 16, AUD_FLAG_16BIT, SCOMP_SOS);
+    bytes.extend_from_slice(&payload);
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&first);
+    raw.extend_from_slice(&second);
+    let expected = decode_adpcm(&raw, false, 8);
+
+    let mut stream = AudStream::open(Cursor::new(bytes)).unwrap();
+    let mut decoded = Vec::new();
+    let mut chunk = [0i16; 1];
+
+    loop {
+        let read = stream.read_samples(&mut chunk).unwrap();
+        if read == 0 {
+            break;
+        }
+        decoded.extend_from_slice(chunk.get(..read).unwrap_or(&[]));
+    }
+
+    assert_eq!(decoded, expected);
+}
+
+/// `AudStream` with `SCOMP_WESTWOOD` correctly strips the per-chunk header
+/// (compressed_size u16 + uncompressed_size u16) and decodes only the ADPCM nibbles.
+///
+/// Why: Westwood AUD files interleave 4-byte chunk framing with compressed data;
+/// if the framing bytes are fed to the ADPCM decoder the output will be garbage.
+#[test]
+fn stream_scomp1_strips_chunk_headers() {
+    let first = [0x07u8, 0x70];
+    let second = [0x11u8, 0x88];
+    let mut payload = Vec::new();
+    for chunk in [first.as_slice(), second.as_slice()] {
+        payload.extend_from_slice(&(chunk.len() as u16).to_le_bytes()); // compressed_size
+        payload.extend_from_slice(&8u16.to_le_bytes()); // uncompressed_size
+        payload.extend_from_slice(chunk);
+    }
+
+    let mut bytes = make_header_bytes(22050, payload.len() as u32, 16, AUD_FLAG_16BIT, SCOMP_WESTWOOD);
     bytes.extend_from_slice(&payload);
 
     let mut raw = Vec::new();
@@ -157,15 +210,16 @@ fn stream_rejects_truncated_scomp99_chunk_payload() {
 /// second pass the loop will contain an audible glitch.
 #[test]
 fn seekable_stream_rewind_replays_samples() {
-    let compressed = [0x07u8, 0x70, 0x11, 0x88];
+    let raw_adpcm = [0x07u8, 0x70, 0x11, 0x88];
+    let payload = make_westwood_payload(&raw_adpcm, 8);
     let mut bytes = make_header_bytes(
         22050,
-        compressed.len() as u32,
+        payload.len() as u32,
         16,
         AUD_FLAG_16BIT,
         SCOMP_WESTWOOD,
     );
-    bytes.extend_from_slice(&compressed);
+    bytes.extend_from_slice(&payload);
 
     let mut stream = AudStream::open_seekable(Cursor::new(bytes)).unwrap();
     let mut first = [0i16; 4];
@@ -188,15 +242,16 @@ fn seekable_stream_rewind_replays_samples() {
 /// playback timestamps; wrong offsets or counts would cause audio desynchronisation.
 #[test]
 fn stream_next_chunk_reports_timing_and_progress() {
-    let compressed = [0x07u8, 0x70, 0x11, 0x88];
+    let raw_adpcm = [0x07u8, 0x70, 0x11, 0x88];
+    let payload = make_westwood_payload(&raw_adpcm, 8);
     let mut bytes = make_header_bytes(
         22050,
-        compressed.len() as u32,
+        payload.len() as u32,
         16,
         AUD_FLAG_16BIT,
         SCOMP_WESTWOOD,
     );
-    bytes.extend_from_slice(&compressed);
+    bytes.extend_from_slice(&payload);
 
     let mut stream = AudStream::open(Cursor::new(bytes)).unwrap();
     assert_eq!(stream.decoded_sample_frames(), 0);
@@ -234,15 +289,16 @@ fn stream_next_chunk_reports_timing_and_progress() {
 /// under the hood but operate through different code paths in the chunk-queue API.
 #[test]
 fn seekable_stream_restart_replays_chunks() {
-    let compressed = [0x07u8, 0x70, 0x11, 0x88];
+    let raw_adpcm = [0x07u8, 0x70, 0x11, 0x88];
+    let payload = make_westwood_payload(&raw_adpcm, 8);
     let mut bytes = make_header_bytes(
         22050,
-        compressed.len() as u32,
+        payload.len() as u32,
         16,
         AUD_FLAG_16BIT,
         SCOMP_WESTWOOD,
     );
-    bytes.extend_from_slice(&compressed);
+    bytes.extend_from_slice(&payload);
 
     let mut stream = AudStream::open_seekable(Cursor::new(bytes)).unwrap();
     let first = stream.next_chunk(4).unwrap().unwrap();
@@ -346,20 +402,21 @@ fn try_resync_returns_false_for_non_sos() {
 /// `read_samples` iterations through a small scratch buffer.
 #[test]
 fn stream_larger_mono_matches_batch() {
-    let compressed: Vec<u8> = (0..64u8)
+    let raw_adpcm: Vec<u8> = (0..64u8)
         .map(|i| i.wrapping_mul(37).wrapping_add(5))
         .collect();
-    let uncompressed_samples = compressed.len() * 2; // 2 nibbles per byte
+    let num_samples = (raw_adpcm.len() * 2) as u16; // 2 nibbles per byte
+    let payload = make_westwood_payload(&raw_adpcm, num_samples);
     let mut bytes = make_header_bytes(
         22050,
-        compressed.len() as u32,
-        (uncompressed_samples * 2) as u32,
+        payload.len() as u32,
+        u32::from(num_samples).saturating_mul(2),
         AUD_FLAG_16BIT,
         SCOMP_WESTWOOD,
     );
-    bytes.extend_from_slice(&compressed);
+    bytes.extend_from_slice(&payload);
 
-    let expected = decode_adpcm(&compressed, false, 0);
+    let expected = decode_adpcm(&raw_adpcm, false, 0);
     assert_eq!(expected.len(), 128);
 
     let mut stream = AudStream::open(Cursor::new(bytes)).unwrap();
@@ -385,20 +442,21 @@ fn stream_larger_mono_matches_batch() {
 #[test]
 fn stream_stereo_matches_batch() {
     // 32 bytes → 16 byte-pairs → 64 samples (32 per channel, interleaved).
-    let compressed: Vec<u8> = (0..32u8)
+    let raw_adpcm: Vec<u8> = (0..32u8)
         .map(|i| i.wrapping_mul(53).wrapping_add(17))
         .collect();
-    let uncompressed_samples = compressed.len() * 2;
+    let num_samples = (raw_adpcm.len() * 2) as u16;
+    let payload = make_westwood_payload(&raw_adpcm, num_samples);
     let mut bytes = make_header_bytes(
         22050,
-        compressed.len() as u32,
-        (uncompressed_samples * 2) as u32,
+        payload.len() as u32,
+        u32::from(num_samples).saturating_mul(2),
         AUD_FLAG_STEREO | AUD_FLAG_16BIT,
         SCOMP_WESTWOOD,
     );
-    bytes.extend_from_slice(&compressed);
+    bytes.extend_from_slice(&payload);
 
-    let expected = decode_adpcm(&compressed, true, 0);
+    let expected = decode_adpcm(&raw_adpcm, true, 0);
     assert_eq!(expected.len(), 64);
 
     let mut stream = AudStream::open(Cursor::new(bytes)).unwrap();
@@ -427,18 +485,19 @@ fn stream_stereo_matches_batch() {
 /// their samples, and comparing to the flat `read_samples` output.
 #[test]
 fn next_chunk_reassembly_matches_read_samples() {
-    let compressed: Vec<u8> = (0..48u8)
+    let raw_adpcm: Vec<u8> = (0..48u8)
         .map(|i| i.wrapping_mul(41).wrapping_add(9))
         .collect();
-    let uncompressed_samples = compressed.len() * 2;
+    let num_samples = (raw_adpcm.len() * 2) as u16;
+    let payload = make_westwood_payload(&raw_adpcm, num_samples);
     let mut bytes = make_header_bytes(
         22050,
-        compressed.len() as u32,
-        (uncompressed_samples * 2) as u32,
+        payload.len() as u32,
+        u32::from(num_samples).saturating_mul(2),
         AUD_FLAG_16BIT,
         SCOMP_WESTWOOD,
     );
-    bytes.extend_from_slice(&compressed);
+    bytes.extend_from_slice(&payload);
 
     // Collect via read_samples.
     let mut stream_flat = AudStream::open(Cursor::new(&bytes)).unwrap();
@@ -475,27 +534,30 @@ fn next_chunk_reassembly_matches_read_samples() {
 /// Proves `AudStream::from_payload` (the export path used by `aud_to_wav`)
 /// produces the same samples as direct batch `decode_adpcm` on raw ADPCM bytes.
 ///
-/// This is the exact path that `aud_to_wav` takes: parse an `AudFile`, then
-/// hand `compressed_data` to `AudStream::from_payload` for incremental decode.
+/// `from_payload` receives the full chunk-framed `compressed_data`; it strips
+/// the 4-byte Westwood chunk header internally.  `decode_adpcm` receives just
+/// the raw ADPCM bytes for comparison.
 #[test]
 fn from_payload_matches_batch_on_raw_adpcm() {
-    let compressed: Vec<u8> = (0..80u8)
+    let raw_adpcm: Vec<u8> = (0..80u8)
         .map(|i| i.wrapping_mul(29).wrapping_add(3))
         .collect();
-    let uncompressed_samples = compressed.len() * 2;
+    let num_samples = (raw_adpcm.len() * 2) as u16;
+    let payload = make_westwood_payload(&raw_adpcm, num_samples);
     let mut file_bytes = make_header_bytes(
         22050,
-        compressed.len() as u32,
-        (uncompressed_samples * 2) as u32,
+        payload.len() as u32,
+        u32::from(num_samples).saturating_mul(2),
         AUD_FLAG_16BIT,
         SCOMP_WESTWOOD,
     );
-    file_bytes.extend_from_slice(&compressed);
+    file_bytes.extend_from_slice(&payload);
 
     let aud = AudFile::parse(&file_bytes).unwrap();
-    let batch = decode_adpcm(aud.compressed_data, false, 0);
+    // Batch decode on raw ADPCM bytes (strip the 4-byte chunk header).
+    let batch = decode_adpcm(&raw_adpcm, false, 0);
 
-    // Mirror the aud_to_wav export path.
+    // Mirror the aud_to_wav export path — from_payload gets the chunk-framed data.
     let mut stream = AudStream::from_payload(aud.header.clone(), Cursor::new(aud.compressed_data));
     let mut streamed = Vec::new();
     let mut scratch = [0i16; 19];

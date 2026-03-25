@@ -36,7 +36,7 @@ use crate::error::Error;
 use crate::lcw;
 
 use super::render::{render_frame_pixels, VqaRenderGeometry};
-use super::snd_decode::{append_snd0, append_snd1, append_snd2};
+use super::snd_decode::{append_snd0, append_snd1, append_snd2_stateful};
 use super::{VqaFile, VqaHeader};
 use std::borrow::Cow;
 
@@ -502,66 +502,36 @@ impl VqaFile<'_> {
         let stereo = self.header.is_stereo();
         let mut all_samples: Vec<i16> = Vec::new();
 
-        // IMA ADPCM state must be maintained across SND2 chunks.
-        let mut left_sample: i32 = 0;
-        let mut left_index: usize = 0;
-        let mut right_sample: i32 = 0;
-        let mut right_index: usize = 0;
+        // SND2 IMA ADPCM state is maintained across chunk boundaries.
+        let mut ima_l_sample: i32 = 0;
+        let mut ima_l_index: usize = 0;
+        let mut ima_r_sample: i32 = 0;
+        let mut ima_r_index: usize = 0;
 
         for chunk in &self.chunks {
-            match &chunk.fourcc {
-                b"SND0" => {
-                    // Raw PCM data.
-                    let added = append_snd0(&mut all_samples, chunk.data, self.header.bits)?;
-                    if all_samples.len() > MAX_AUDIO_TOTAL {
-                        return Err(Error::InvalidSize {
-                            value: all_samples.len(),
-                            limit: MAX_AUDIO_TOTAL,
-                            context: "VQA audio output",
-                        });
-                    }
-                    if added == 0 {
-                        continue;
-                    }
-                }
-                b"SND1" => {
-                    // Westwood ADPCM (8-bit, unsigned).
-                    let added = append_snd1(&mut all_samples, chunk.data)?;
-                    if all_samples.len() > MAX_AUDIO_TOTAL {
-                        return Err(Error::InvalidSize {
-                            value: all_samples.len(),
-                            limit: MAX_AUDIO_TOTAL,
-                            context: "VQA audio output",
-                        });
-                    }
-                    if added == 0 {
-                        continue;
-                    }
-                }
-                b"SND2" => {
-                    // IMA ADPCM (16-bit).  State carried across chunks.
-                    let added = append_snd2(
-                        &mut all_samples,
-                        chunk.data,
-                        stereo,
-                        &mut left_sample,
-                        &mut left_index,
-                        &mut right_sample,
-                        &mut right_index,
-                    )?;
-                    if all_samples.len() > MAX_AUDIO_TOTAL {
-                        return Err(Error::InvalidSize {
-                            value: all_samples.len(),
-                            limit: MAX_AUDIO_TOTAL,
-                            context: "VQA audio output",
-                        });
-                    }
-                    if added == 0 {
-                        continue;
-                    }
-                }
-                _ => {}
+            let added = match &chunk.fourcc {
+                b"SND0" => append_snd0(&mut all_samples, chunk.data, self.header.bits)?,
+                b"SND1" => append_snd1(&mut all_samples, chunk.data)?,
+                // SND2: IMA ADPCM, state is maintained across chunks per VQA spec.
+                b"SND2" => append_snd2_stateful(
+                    &mut all_samples,
+                    chunk.data,
+                    stereo,
+                    &mut ima_l_sample,
+                    &mut ima_l_index,
+                    &mut ima_r_sample,
+                    &mut ima_r_index,
+                )?,
+                _ => continue,
+            };
+            if all_samples.len() > MAX_AUDIO_TOTAL {
+                return Err(Error::InvalidSize {
+                    value: all_samples.len(),
+                    limit: MAX_AUDIO_TOTAL,
+                    context: "VQA audio output",
+                });
             }
+            let _ = added;
         }
 
         if all_samples.is_empty() {

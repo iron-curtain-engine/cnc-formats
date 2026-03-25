@@ -524,6 +524,68 @@ pub fn encode_adpcm(samples: &[i16], stereo: bool) -> Vec<u8> {
     }
 }
 
+/// Encodes PCM samples into Westwood IMA ADPCM compressed bytes, carrying
+/// encoder state across calls.
+///
+/// This is the stateful variant of [`encode_adpcm`].  Pass the same state
+/// tuple for every chunk in a stream.  Initialise it to `(0, 0, 0, 0)` for
+/// the first chunk.  State layout: `(l_sample, l_index, r_sample, r_index)`.
+///
+/// Returns the encoded bytes and the updated state.
+pub(crate) fn encode_adpcm_stateful(
+    samples: &[i16],
+    stereo: bool,
+    l_sample: &mut i32,
+    l_index: &mut usize,
+    r_sample: &mut i32,
+    r_index: &mut usize,
+) -> Vec<u8> {
+    let mut left = AdpcmChannel {
+        sample: *l_sample,
+        step_index: *l_index,
+    };
+    let mut right = AdpcmChannel {
+        sample: *r_sample,
+        step_index: *r_index,
+    };
+
+    let out = if stereo {
+        let mut out = Vec::with_capacity(samples.len());
+        let mut i = 0;
+        while i + 3 < samples.len() {
+            let lo_l = left.encode_nibble(samples.get(i).copied().unwrap_or(0));
+            let hi_l = left.encode_nibble(samples.get(i + 2).copied().unwrap_or(0));
+            out.push((hi_l << 4) | (lo_l & 0x0F));
+            let lo_r = right.encode_nibble(samples.get(i + 1).copied().unwrap_or(0));
+            let hi_r = right.encode_nibble(samples.get(i + 3).copied().unwrap_or(0));
+            out.push((hi_r << 4) | (lo_r & 0x0F));
+            i += 4;
+        }
+        out
+    } else {
+        let mut out = Vec::with_capacity(samples.len().div_ceil(2));
+        let mut i = 0;
+        while i < samples.len() {
+            let lo = left.encode_nibble(samples.get(i).copied().unwrap_or(0));
+            let hi = if i + 1 < samples.len() {
+                left.encode_nibble(samples.get(i + 1).copied().unwrap_or(0))
+            } else {
+                0
+            };
+            out.push((hi << 4) | (lo & 0x0F));
+            i += 2;
+        }
+        out
+    };
+
+    *l_sample = left.sample;
+    *l_index = left.step_index;
+    *r_sample = right.sample;
+    *r_index = right.step_index;
+
+    out
+}
+
 /// Builds a complete AUD file from PCM samples.
 ///
 /// Encodes the given PCM samples as Westwood IMA ADPCM and wraps them in a
@@ -537,7 +599,8 @@ pub fn encode_adpcm(samples: &[i16], stereo: bool) -> Vec<u8> {
 /// - `stereo`: whether the samples are stereo-interleaved.
 pub fn build_aud(samples: &[i16], sample_rate: u16, stereo: bool) -> Vec<u8> {
     let compressed = encode_adpcm(samples, stereo);
-    let compressed_size = compressed.len() as u32;
+    // Compressed size includes the 4-byte per-chunk Westwood frame header.
+    let compressed_size = (compressed.len() as u32).saturating_add(4);
     // Uncompressed size: 2 bytes per sample (16-bit PCM).
     let uncompressed_size = (samples.len() as u32).saturating_mul(2);
     let flags = if stereo {
