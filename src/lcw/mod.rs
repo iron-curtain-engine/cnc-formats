@@ -68,6 +68,20 @@ impl<'input> LcwDecoder<'input> {
         }
     }
 
+    /// Creates a decoder that reuses an existing allocation as output buffer.
+    ///
+    /// `dst` is cleared before use; its capacity is preserved.  This avoids
+    /// a heap allocation when the caller already has a suitably-sized buffer
+    /// (e.g. reusing the codebook Vec across frame updates).
+    fn with_buffer(src: &'input [u8], mut dst: Vec<u8>, max_output: usize) -> Self {
+        dst.clear();
+        let cap = max_output.min(src.len().saturating_mul(MAX_RATIO));
+        if dst.capacity() < cap {
+            dst.reserve(cap - dst.capacity());
+        }
+        Self { src, pos: 0, out: dst, max_output }
+    }
+
     /// Reads one byte from the compressed source, advancing `pos`.
     ///
     /// Returns `UnexpectedEof` if the source is exhausted.  This is the
@@ -257,19 +271,17 @@ impl<'input> LcwDecoder<'input> {
     fn run(mut self) -> Result<Vec<u8>, Error> {
         loop {
             let cmd = self.read_byte()?;
-
-            if cmd == 0x80 {
-                break;
-            } else if (cmd & 0x80) == 0 {
-                self.short_relative_copy(cmd)?;
-            } else if (cmd & 0xC0) == 0x80 {
-                self.medium_literal(cmd)?;
-            } else {
-                match cmd {
+            match cmd >> 6 {
+                0 | 1 => self.short_relative_copy(cmd)?,  // 0x00–0x7F
+                2 => {
+                    if cmd == 0x80 { break; }              // end-of-stream
+                    self.medium_literal(cmd)?;             // 0x81–0xBF
+                }
+                _ => match cmd {                           // 0xC0–0xFF
                     0xFF => self.long_absolute_copy()?,
                     0xFE => self.long_fill()?,
                     _ => self.medium_absolute_copy(cmd)?,
-                }
+                },
             }
         }
         Ok(self.out)
@@ -283,6 +295,22 @@ impl<'input> LcwDecoder<'input> {
 /// if the output would exceed `max_output`).
 pub fn decompress(src: &[u8], max_output: usize) -> Result<Vec<u8>, Error> {
     LcwDecoder::new(src, max_output).run()
+}
+
+/// Decompresses an LCW-compressed byte slice into an existing `Vec<u8>`,
+/// reusing its heap allocation.
+///
+/// `dst` is cleared before decompression begins; its capacity is preserved
+/// so callers that call this repeatedly (e.g. per-codebook-update) avoid
+/// repeated heap allocation.
+///
+/// `max_output` is both the pre-allocation hint and the safety cap.
+pub fn decompress_into(src: &[u8], dst: &mut Vec<u8>, max_output: usize) -> Result<(), Error> {
+    let buf = std::mem::take(dst);
+    match LcwDecoder::with_buffer(src, buf, max_output).run() {
+        Ok(out) => { *dst = out; Ok(()) }
+        Err(e)  => { *dst = Vec::new(); Err(e) }
+    }
 }
 
 // ── LCW Compressor ───────────────────────────────────────────────────────────

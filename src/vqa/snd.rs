@@ -27,45 +27,30 @@ use std::borrow::Cow;
 /// `r_sample`/`r_index` are ignored.
 /// The returned samples are interleaved: L0, R0, L1, R1, …
 pub(super) fn decode_snd2_chunk_stateful(
+    out: &mut Vec<i16>,
     data: &[u8],
     stereo: bool,
     l_sample: &mut i32,
     l_index: &mut usize,
     r_sample: &mut i32,
     r_index: &mut usize,
-) -> Vec<i16> {
+) {
     if stereo {
         let half = data.len() / 2;
         let left_data = data.get(..half).unwrap_or(&[]);
         let right_data = data.get(half..).unwrap_or(&[]);
 
-        let mut left_pcm: Vec<i16> = Vec::with_capacity(left_data.len() * 2);
-        for &byte in left_data {
-            left_pcm.push(ima_decode_nibble(byte & 0x0F, l_sample, l_index));
-            left_pcm.push(ima_decode_nibble(byte >> 4, l_sample, l_index));
+        for (&lb, &rb) in left_data.iter().zip(right_data.iter()) {
+            out.push(ima_decode_nibble(lb & 0x0F, l_sample, l_index));
+            out.push(ima_decode_nibble(rb & 0x0F, r_sample, r_index));
+            out.push(ima_decode_nibble(lb >> 4, l_sample, l_index));
+            out.push(ima_decode_nibble(rb >> 4, r_sample, r_index));
         }
-
-        let mut right_pcm: Vec<i16> = Vec::with_capacity(right_data.len() * 2);
-        for &byte in right_data {
-            right_pcm.push(ima_decode_nibble(byte & 0x0F, r_sample, r_index));
-            right_pcm.push(ima_decode_nibble(byte >> 4, r_sample, r_index));
-        }
-
-        // Interleave L/R.
-        let n = left_pcm.len().min(right_pcm.len());
-        let mut out = Vec::with_capacity(n * 2);
-        for i in 0..n {
-            out.push(left_pcm[i]);
-            out.push(right_pcm[i]);
-        }
-        out
     } else {
-        let mut out = Vec::with_capacity(data.len() * 2);
         for &byte in data {
             out.push(ima_decode_nibble(byte & 0x0F, l_sample, l_index));
             out.push(ima_decode_nibble(byte >> 4, l_sample, l_index));
         }
-        out
     }
 }
 
@@ -78,7 +63,9 @@ fn decode_snd2_chunk(data: &[u8], stereo: bool) -> Vec<i16> {
     let mut li: usize = 0;
     let mut rs: i32 = 0;
     let mut ri: usize = 0;
-    decode_snd2_chunk_stateful(data, stereo, &mut ls, &mut li, &mut rs, &mut ri)
+    let mut out = Vec::new();
+    decode_snd2_chunk_stateful(&mut out, data, stereo, &mut ls, &mut li, &mut rs, &mut ri);
+    out
 }
 
 /// V38: maximum decompressed audio chunk size (1 MB).  Half a second of
@@ -161,8 +148,9 @@ impl VqaAudioChunkDecoder<'_> {
                 // Decode the entire IMA ADPCM chunk upfront.
                 // State resets to (0, 0) per chunk; stereo uses split-half layout.
                 let pcm = decode_snd2_chunk(data.as_ref(), stereo);
-                let mut bytes = Vec::with_capacity(pcm.len() * 2);
-                for s in pcm {
+                let sample_count = pcm.len();
+                let mut bytes = Vec::with_capacity(sample_count * 2);
+                for s in &pcm {
                     bytes.extend_from_slice(&s.to_le_bytes());
                 }
                 Ok(Some(VqaAudioChunkDecoder::Snd0Pcm16 {

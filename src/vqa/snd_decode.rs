@@ -59,8 +59,7 @@ pub(super) fn append_snd2_stateful(
     r_sample: &mut i32,
     r_index: &mut usize,
 ) -> Result<usize, Error> {
-    let pcm = decode_snd2_chunk_stateful(data, stereo, l_sample, l_index, r_sample, r_index);
-    let count = pcm.len();
-    out.extend_from_slice(&pcm);
-    Ok(count)
+    let start = out.len();
+    decode_snd2_chunk_stateful(out, data, stereo, l_sample, l_index, r_sample, r_index);
+    Ok(out.len() - start)
 }

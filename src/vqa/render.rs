@@ -67,8 +67,6 @@ pub(crate) fn render_frame_pixels(
 
             if hi_val == geo.fill_marker {
                 // ── Solid-color fill ─────────────────────────────────
-                // Write `cols_avail` copies of `lo_val` per row using
-                // slice::fill, replacing the per-pixel loop.
                 for row in 0..rows_avail {
                     let dst_start = (block_y + row) * geo.width + block_x;
                     if let Some(dst) = pixels.get_mut(dst_start..dst_start + cols_avail) {
@@ -80,17 +78,22 @@ pub(crate) fn render_frame_pixels(
 
             // ── Codebook block copy ──────────────────────────────────
             // Each codebook entry is `block_w × block_h` pixels laid out
-            // row-major.  Copy one row at a time via `copy_from_slice`,
-            // eliminating the per-pixel inner loop and bounds checks.
+            // row-major.  Copy one row at a time via `copy_from_slice`.
             let block_index = (hi_val as usize)
                 .saturating_mul(256)
                 .saturating_add(lo_val as usize);
             let cb_offset = block_index.saturating_mul(geo.block_size);
 
+            // Pre-check: verify the entire block fits in the codebook.
+            let cb_end = cb_offset
+                .saturating_add(rows_avail.saturating_sub(1).saturating_mul(geo.block_w))
+                .saturating_add(cols_avail);
+            if cb_end > codebook.len() {
+                continue; // malformed codebook reference — skip block, pixels stay 0
+            }
             for row in 0..rows_avail {
                 let src_start = cb_offset + row * geo.block_w;
                 let dst_start = (block_y + row) * geo.width + block_x;
-
                 if let (Some(src), Some(dst)) = (
                     codebook.get(src_start..src_start + cols_avail),
                     pixels.get_mut(dst_start..dst_start + cols_avail),

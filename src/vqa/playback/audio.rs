@@ -120,7 +120,9 @@ impl VqaAudioDecodeState {
         // SND2 (IMA ADPCM): decode directly, carrying state across chunk boundaries.
         if fourcc == b"SND2" {
             let stereo = self.channels >= 2;
-            let pcm = decode_snd2_chunk_stateful(
+            let mut pcm: Vec<i16> = Vec::new();
+            decode_snd2_chunk_stateful(
+                &mut pcm,
                 &data,
                 stereo,
                 &mut self.ima_l_sample,

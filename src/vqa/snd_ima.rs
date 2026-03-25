@@ -13,25 +13,47 @@ const IMA_STEP_TABLE: [i32; 89] = [
 /// IMA ADPCM step-index adjustment table (16 entries).
 const IMA_INDEX_ADJ: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
 
+/// Precomputed delta table: `DELTA_TABLE[step_index][nibble]` gives the signed
+/// delta for that (step, nibble) pair, exactly mirroring the branch logic.
+const DELTA_TABLE: [[i32; 16]; 89] = compute_delta_table();
+
+const fn compute_delta_table() -> [[i32; 16]; 89] {
+    let mut table = [[0i32; 16]; 89];
+    let mut si = 0usize;
+    while si < 89 {
+        let step = IMA_STEP_TABLE[si];
+        let mut nibble = 0usize;
+        while nibble < 16 {
+            let code = (nibble & 0x07) as i32;
+            let mut delta = step >> 3;
+            if code & 4 != 0 {
+                delta = delta.saturating_add(step);
+            }
+            if code & 2 != 0 {
+                delta = delta.saturating_add(step >> 1);
+            }
+            if code & 1 != 0 {
+                delta = delta.saturating_add(step >> 2);
+            }
+            if nibble & 0x08 != 0 {
+                delta = -delta;
+            }
+            table[si][nibble] = delta;
+            nibble += 1;
+        }
+        si += 1;
+    }
+    table
+}
+
 /// Decodes one IMA ADPCM nibble, updating state in place.
 #[inline]
 pub(super) fn ima_decode_nibble(nibble: u8, sample: &mut i32, index: &mut usize) -> i16 {
-    let step = IMA_STEP_TABLE.get(*index).copied().unwrap_or(7);
-    let code = (nibble & 0x07) as i32;
-
-    let mut delta = step >> 3;
-    if code & 4 != 0 {
-        delta = delta.saturating_add(step);
-    }
-    if code & 2 != 0 {
-        delta = delta.saturating_add(step >> 1);
-    }
-    if code & 1 != 0 {
-        delta = delta.saturating_add(step >> 2);
-    }
-    if nibble & 0x08 != 0 {
-        delta = -delta;
-    }
+    let delta = DELTA_TABLE
+        .get(*index)
+        .and_then(|row| row.get(nibble as usize & 0xF))
+        .copied()
+        .unwrap_or(0);
 
     *sample = (*sample).saturating_add(delta).clamp(-32768, 32767);
     let adj = IMA_INDEX_ADJ

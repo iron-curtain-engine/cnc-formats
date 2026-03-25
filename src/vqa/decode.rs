@@ -186,8 +186,10 @@ impl VqaDecodeState {
                     self.copy_codebook(payload)?;
                 }
                 b"CBFZ" => {
-                    let decompressed = lcw::decompress(payload, MAX_CODEBOOK_SIZE)?;
-                    self.replace_codebook(decompressed)?;
+                    lcw::decompress_into(payload, &mut self.codebook, MAX_CODEBOOK_SIZE)?;
+                    self.cbp_buffer.clear();
+                    self.cbp_count = 0;
+                    self.cbp_encoding = None;
                 }
                 b"CBP0" => {
                     deferred_cbp.push((payload, CbpEncoding::Raw));
@@ -310,11 +312,17 @@ impl VqaDecodeState {
             // CBPZ is declared-compressed input.  If LCW decompression fails,
             // the frame data is malformed and must not silently fall back to
             // raw bytes.
-            let new_codebook = match self.cbp_encoding.unwrap_or(CbpEncoding::Raw) {
-                CbpEncoding::Raw => std::mem::take(&mut self.cbp_buffer),
-                CbpEncoding::Compressed => lcw::decompress(&self.cbp_buffer, MAX_CODEBOOK_SIZE)?,
-            };
-            self.codebook = new_codebook;
+            match self.cbp_encoding.unwrap_or(CbpEncoding::Raw) {
+                CbpEncoding::Raw => {
+                    // Swap buffers: cbp_buffer becomes the new codebook,
+                    // and the old codebook buffer will be cleared and reused
+                    // as the next CBP accumulator.
+                    std::mem::swap(&mut self.codebook, &mut self.cbp_buffer);
+                }
+                CbpEncoding::Compressed => {
+                    lcw::decompress_into(&self.cbp_buffer, &mut self.codebook, MAX_CODEBOOK_SIZE)?;
+                }
+            }
             self.cbp_buffer.clear();
             self.cbp_count = 0;
             self.cbp_encoding = None;
