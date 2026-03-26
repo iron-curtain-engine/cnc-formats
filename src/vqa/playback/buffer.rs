@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025–present Iron Curtain contributors
 
+//! VQA playback buffering - VqaFrameBuffer for zero-copy frame delivery.
 use super::*;
 
 /// Reusable caller-owned VQA frame storage.
@@ -177,7 +178,7 @@ impl<R: Read + Seek> VqaDecoder<R> {
                     needed: target_len,
                     available: out_len,
                 })?;
-            let read = front.read_samples(&mut self.audio_decoder, dst)?;
+            let read = front.read_samples(&self.audio_decoder, dst)?;
             let copied_frames = read / channels;
             written = written.saturating_add(read);
             self.audio_sample_frames_delivered = self
@@ -230,7 +231,7 @@ impl<R: Read + Seek> VqaDecoder<R> {
                         needed: target_len,
                         available: out_len,
                     })?;
-                let read = front.read_samples(&mut self.audio_decoder, dst)?;
+                let read = front.read_samples(&self.audio_decoder, dst)?;
                 let copied_frames = read / channels;
                 written = written.saturating_add(read);
                 self.audio_sample_frames_delivered = self

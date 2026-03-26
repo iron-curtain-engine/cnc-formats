@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025–present Iron Curtain contributors
 
+//! CLI argument types for the `cncf` binary.
+//!
+//! Defines the top-level [`Cli`] struct (parsed by clap), all [`Subcommand`]
+//! variants (`validate`, `inspect`, `convert`, `list`, `extract`, `check`,
+//! `fingerprint`), and supporting enums (`FormatHint`, `OutputFormat`, etc.)
+//! used to route commands in `main.rs`.
+
 use clap::{Parser, Subcommand, ValueEnum};
 
 /// CLI tool for working with classic Command & Conquer game assets.

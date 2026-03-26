@@ -298,10 +298,8 @@ impl<'a> WsaFile<'a> {
             if loop_end_rel > loop_start_rel {
                 let abs_start = data_base.saturating_add(loop_start_rel);
                 let abs_end = data_base.saturating_add(loop_end_rel);
-                data.get(abs_start..abs_end).map(|d| WsaFrame {
-                    index: fc,
-                    data: d,
-                })
+                data.get(abs_start..abs_end)
+                    .map(|d| WsaFrame { index: fc, data: d })
             } else {
                 None
             }

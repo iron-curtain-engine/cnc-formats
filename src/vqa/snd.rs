@@ -109,7 +109,9 @@ pub(super) fn decode_snd1_chunk_stateful(
     let mut pos = 4usize;
     let mut remaining_output = out_size;
     let mut mode = if in_size == out_size {
-        Snd1Mode::RawCopy { remaining: out_size }
+        Snd1Mode::RawCopy {
+            remaining: out_size,
+        }
     } else {
         Snd1Mode::Idle
     };
@@ -309,10 +311,7 @@ impl VqaAudioChunkDecoder<'_> {
         }
     }
 
-    pub(super) fn read_samples(
-        &mut self,
-        out: &mut [i16],
-    ) -> Result<usize, Error> {
+    pub(super) fn read_samples(&mut self, out: &mut [i16]) -> Result<usize, Error> {
         match self {
             Self::Snd0Pcm16 { data, pos } => read_snd0_pcm16(data, pos, out),
             Self::Snd0Pcm8 { data, pos } => read_snd0_pcm8(data, pos, out),

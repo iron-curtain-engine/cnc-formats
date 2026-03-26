@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025–present Iron Curtain contributors
 
+//! Unit tests for VQA decode, render, and compact-codebook logic.
 use super::tests::write_u16_le;
 use super::*;
 
@@ -148,20 +149,6 @@ fn single_block_geo() -> super::render::VqaRenderGeometry {
     }
 }
 
-/// Helper: 8×2-pixel geometry for two side-by-side blocks (2×1 grid).
-fn two_block_geo() -> super::render::VqaRenderGeometry {
-    super::render::VqaRenderGeometry {
-        width: 8,
-        height: 2,
-        block_w: 4,
-        block_h: 2,
-        blocks_x: 2,
-        blocks_y: 1,
-        block_size: 8,
-        fill_marker: 0x0F,
-    }
-}
-
 /// Build a 1-block VPT (lo=entry_lo, hi=entry_hi, no fill).
 fn vpt_one_block(entry_lo: u8, entry_hi: u8) -> Vec<u8> {
     vec![entry_lo, entry_hi]
@@ -175,7 +162,7 @@ fn compact_codebook_pixel_parity_with_original() {
     let geo = single_block_geo();
     // Codebook: 4 entries, 8 bytes each (distinct non-zero patterns).
     let codebook: Vec<u8> = (0u8..4)
-        .flat_map(|e| std::iter::repeat(e + 1).take(8))
+        .flat_map(|e| std::iter::repeat_n(e + 1, 8))
         .collect(); // [1,1,1,1,1,1,1,1, 2,2,...,  3,3,...,  4,4,...]
 
     // VPT referencing entry 2 (lo=2, hi=0).
@@ -234,7 +221,9 @@ fn compact_codebook_most_used_entry_at_front() {
         build_compact_codebook(&geo, &codebook, &vpt).expect("compaction should succeed");
 
     // The hottest entry (entry 2, value 30) must be at compact index 0.
-    let first_entry: &[u8] = compact_cb.get(0..8).expect("compact codebook must have at least one entry");
+    let first_entry: &[u8] = compact_cb
+        .get(0..8)
+        .expect("compact codebook must have at least one entry");
     assert!(
         first_entry.iter().all(|&b| b == 30),
         "most-referenced entry (value 30) must occupy compact index 0 (cache-hottest slot)"
@@ -259,9 +248,7 @@ fn compact_codebook_excludes_unreferenced_entries() {
     };
 
     // 10-entry codebook; only entries 0, 4, 9 are referenced.
-    let codebook: Vec<u8> = (0u8..10)
-        .flat_map(|e| std::iter::repeat(e).take(8))
-        .collect();
+    let codebook: Vec<u8> = (0u8..10).flat_map(|e| std::iter::repeat_n(e, 8)).collect();
 
     // VPT: lo=[0, 4, 9], hi=[0, 0, 0]
     let vpt: Vec<u8> = vec![0, 4, 9, 0, 0, 0];
@@ -300,8 +287,7 @@ fn compact_codebook_fill_blocks_survive_remap() {
 
     // Original render.
     let mut orig = vec![0u8; 16];
-    render_frame_pixels(&geo, &codebook, &vpt, &mut orig)
-        .expect("original render should succeed");
+    render_frame_pixels(&geo, &codebook, &vpt, &mut orig).expect("original render should succeed");
 
     // Compact render.
     let (compact_cb, compact_vpt) =
@@ -310,16 +296,29 @@ fn compact_codebook_fill_blocks_survive_remap() {
     render_frame_pixels(&geo, &compact_cb, &compact_vpt, &mut compact_out)
         .expect("compact render should succeed");
 
-    assert_eq!(orig, compact_out, "fill blocks must render identically after compaction");
+    assert_eq!(
+        orig, compact_out,
+        "fill blocks must render identically after compaction"
+    );
     // Frame layout (8 wide × 2 high, row-major):
     //   Row 0: [block0_col0..3, block1_col4..7]  = indices 0..7
     //   Row 1: [block0_col0..3, block1_col4..7]  = indices 8..15
     // Block 0 (fill 42) covers columns 0-3: indices 0-3 and 8-11.
     // Block 1 (codebook 99) covers columns 4-7: indices 4-7 and 12-15.
-    let block0_pixels: Vec<u8> = (0..2).flat_map(|row| orig[row * 8..row * 8 + 4].iter().copied()).collect();
-    let block1_pixels: Vec<u8> = (0..2).flat_map(|row| orig[row * 8 + 4..row * 8 + 8].iter().copied()).collect();
-    assert!(block0_pixels.iter().all(|&p| p == 42), "left block (fill 42) pixels must all be 42");
-    assert!(block1_pixels.iter().all(|&p| p == 99), "right block (codebook entry 0 = 99) pixels must all be 99");
+    let block0_pixels: Vec<u8> = (0..2)
+        .flat_map(|row| orig[row * 8..row * 8 + 4].iter().copied())
+        .collect();
+    let block1_pixels: Vec<u8> = (0..2)
+        .flat_map(|row| orig[row * 8 + 4..row * 8 + 8].iter().copied())
+        .collect();
+    assert!(
+        block0_pixels.iter().all(|&p| p == 42),
+        "left block (fill 42) pixels must all be 42"
+    );
+    assert!(
+        block1_pixels.iter().all(|&p| p == 99),
+        "right block (codebook entry 0 = 99) pixels must all be 99"
+    );
 }
 
 /// An all-fill frame returns None from build_compact_codebook.

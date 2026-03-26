@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025–present Iron Curtain contributors
 
+//! Streaming VQA playback decoder - VqaDecoder, incremental frame/audio API.
 use super::decode::{VqaDecodeState, VqaFrame};
 use super::{parse_finf, parse_vqhd, VqaHeader, VqaStream};
 use crate::error::Error;
@@ -239,7 +240,7 @@ impl<R: Read + Seek> VqaDecoder<R> {
 
         loop {
             if let Some(audio) = self.audio_queue.pop_front() {
-                let (audio, backing) = audio.into_audio_chunk(&mut self.audio_decoder)?;
+                let (audio, backing) = audio.into_audio_chunk(&self.audio_decoder)?;
                 if let Some(buf) = backing {
                     recycle_audio_chunk_buffer(&mut self.audio_chunk_pool, buf);
                 }
@@ -427,7 +428,7 @@ impl<R: Read + Seek> VqaDecoder<R> {
                 needed: end,
                 available: combined_len,
             })?;
-            let read = front.read_samples(&mut self.audio_decoder, dst)?;
+            let read = front.read_samples(&self.audio_decoder, dst)?;
             combined.truncate(start.saturating_add(read));
             remaining = remaining.saturating_sub(read / channels_usize);
 

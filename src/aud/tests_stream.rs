@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025-present Iron Curtain contributors
 
+//! Integration tests for AUD streaming (AudStream) and seek support.
 use super::tests::make_header_bytes;
 use super::*;
 
@@ -131,7 +132,13 @@ fn stream_scomp1_strips_chunk_headers() {
         payload.extend_from_slice(chunk);
     }
 
-    let mut bytes = make_header_bytes(22050, payload.len() as u32, 16, AUD_FLAG_16BIT, SCOMP_WESTWOOD);
+    let mut bytes = make_header_bytes(
+        22050,
+        payload.len() as u32,
+        16,
+        AUD_FLAG_16BIT,
+        SCOMP_WESTWOOD,
+    );
     bytes.extend_from_slice(&payload);
 
     let mut raw = Vec::new();

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025-present Iron Curtain contributors
 
-use super::{DipFile, DipSegmentedFile};
+//! Unit tests for DIP/segmented-DIP palette parsing.
+use super::*;
 
 fn segmented_dip_bytes() -> Vec<u8> {
     let section0 = [0x00, 0x00, 0x3C, 0x3C];

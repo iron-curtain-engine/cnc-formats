@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025–present Iron Curtain contributors
 
-use super::super::snd::{decode_snd1_chunk_stateful, decode_snd2_chunk_stateful, VqaAudioChunkDecoder};
+//! VQA playback audio helpers - queued-audio chunk type and decode state.
+use super::super::snd::{
+    decode_snd1_chunk_stateful, decode_snd2_chunk_stateful, VqaAudioChunkDecoder,
+};
 use super::super::VqaHeader;
 use super::VqaAudioChunk;
 use crate::error::Error;
@@ -130,7 +133,10 @@ impl VqaAudioDecodeState {
             if sample_frames == 0 {
                 return Ok((None, backing));
             }
-            let decoder = VqaAudioChunkDecoder::PcmDirect { samples: pcm, pos: 0 };
+            let decoder = VqaAudioChunkDecoder::PcmDirect {
+                samples: pcm,
+                pos: 0,
+            };
             let chunk = VqaQueuedAudio {
                 start_sample_frame: self.next_start_sample_frame,
                 decoder,
@@ -162,7 +168,10 @@ impl VqaAudioDecodeState {
             if sample_frames == 0 {
                 return Ok((None, backing));
             }
-            let decoder = VqaAudioChunkDecoder::PcmDirect { samples: pcm, pos: 0 };
+            let decoder = VqaAudioChunkDecoder::PcmDirect {
+                samples: pcm,
+                pos: 0,
+            };
             let chunk = VqaQueuedAudio {
                 start_sample_frame: self.next_start_sample_frame,
                 decoder,

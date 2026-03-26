@@ -79,7 +79,12 @@ impl<'input> LcwDecoder<'input> {
         if dst.capacity() < cap {
             dst.reserve(cap - dst.capacity());
         }
-        Self { src, pos: 0, out: dst, max_output }
+        Self {
+            src,
+            pos: 0,
+            out: dst,
+            max_output,
+        }
     }
 
     /// Reads one byte from the compressed source, advancing `pos`.
@@ -272,12 +277,15 @@ impl<'input> LcwDecoder<'input> {
         loop {
             let cmd = self.read_byte()?;
             match cmd >> 6 {
-                0 | 1 => self.short_relative_copy(cmd)?,  // 0x00–0x7F
+                0 | 1 => self.short_relative_copy(cmd)?, // 0x00–0x7F
                 2 => {
-                    if cmd == 0x80 { break; }              // end-of-stream
-                    self.medium_literal(cmd)?;             // 0x81–0xBF
+                    if cmd == 0x80 {
+                        break;
+                    } // end-of-stream
+                    self.medium_literal(cmd)?; // 0x81–0xBF
                 }
-                _ => match cmd {                           // 0xC0–0xFF
+                _ => match cmd {
+                    // 0xC0–0xFF
                     0xFF => self.long_absolute_copy()?,
                     0xFE => self.long_fill()?,
                     _ => self.medium_absolute_copy(cmd)?,
@@ -308,8 +316,14 @@ pub fn decompress(src: &[u8], max_output: usize) -> Result<Vec<u8>, Error> {
 pub fn decompress_into(src: &[u8], dst: &mut Vec<u8>, max_output: usize) -> Result<(), Error> {
     let buf = std::mem::take(dst);
     match LcwDecoder::with_buffer(src, buf, max_output).run() {
-        Ok(out) => { *dst = out; Ok(()) }
-        Err(e)  => { *dst = Vec::new(); Err(e) }
+        Ok(out) => {
+            *dst = out;
+            Ok(())
+        }
+        Err(e) => {
+            *dst = Vec::new();
+            Err(e)
+        }
     }
 }
 

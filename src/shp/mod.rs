@@ -501,7 +501,7 @@ impl<'input> ShpFile<'input> {
     /// - **XorLcw (0x40) / `KF_KEYDELTA`:** Apply a **Format40-encoded**
     ///   XOR-delta stream against the decoded reference keyframe (identified by
     ///   [`ShpFrame::ref_offset`]).  The delta is a command stream, not raw
-    ///   bytes — see [`apply_xor_delta`] for the command encoding.
+    ///   bytes — see `apply_xor_delta` for the command encoding.
     /// - **XorPrev (0x20) / `KF_DELTA`:** Apply a **Format40-encoded**
     ///   XOR-delta stream against the immediately preceding decoded frame.
     ///

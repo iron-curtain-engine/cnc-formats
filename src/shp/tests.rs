@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025-present Iron Curtain contributors
 
+//! Unit tests for SHP (KeyFrame) sprite parsing and decoding.
 use super::*;
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -432,6 +433,7 @@ fn decode_frames_xorlcw_uses_reference_keyframe() {
 ///   - 0x01 0xFF     → small XOR 1 byte 0xFF       (pixel 1: 0x20^0xFF=0xDF)
 ///   - 0x00 0x02 0x0F→ repeated XOR 2× value 0x0F  (pixel 2: 0x3F, pixel 3: 0x4F)
 ///   - 0x80 0x00 0x00→ end of stream               (pixel 4 unchanged)
+///
 /// Expected frame 1: [0x10, 0xDF, 0x3F, 0x4F, 0x50].
 #[test]
 fn decode_frames_format40_command_types() {
@@ -439,10 +441,10 @@ fn decode_frames_format40_command_types() {
     let lcw_frame0: &[u8] = &[0x85, 0x10, 0x20, 0x30, 0x40, 0x50, 0x80];
     // Format40 delta exercising: small skip, small XOR, repeated XOR, end marker.
     let fmt40_delta: &[u8] = &[
-        0x81,               // small skip 1
-        0x01, 0xFF,         // small XOR from stream: 1 byte → pixel 1 ^= 0xFF
-        0x00, 0x02, 0x0F,   // repeated XOR: 2 pixels with 0x0F
-        0x80, 0x00, 0x00,   // end of stream
+        0x81, // small skip 1
+        0x01, 0xFF, // small XOR from stream: 1 byte → pixel 1 ^= 0xFF
+        0x00, 0x02, 0x0F, // repeated XOR: 2 pixels with 0x0F
+        0x80, 0x00, 0x00, // end of stream
     ];
 
     let width: u16 = 1;

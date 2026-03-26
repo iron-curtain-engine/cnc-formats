@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025–present Iron Curtain contributors
 
+//! VQA frame rendering - VPT/codebook lookup and compact-codebook builder.
 use crate::error::Error;
 
 // ─── Compact codebook ────────────────────────────────────────────────────────
@@ -93,8 +94,7 @@ pub(crate) fn build_compact_codebook(
     }
 
     // ── Build compact codebook ─────────────────────────────────────────────
-    let mut compact_cb: Vec<u8> =
-        Vec::with_capacity(ranked.len().saturating_mul(geo.block_size));
+    let mut compact_cb: Vec<u8> = Vec::with_capacity(ranked.len().saturating_mul(geo.block_size));
     // Remap table: old block_index → new compact index.
     let mut remap: Vec<u16> = vec![0u16; entry_count];
 

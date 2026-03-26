@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2025-present Iron Curtain contributors
 
+//! Integration tests for MIX streaming and incremental entry access.
 use super::*;
 
 use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -257,5 +258,9 @@ fn nested_read_via_entry_reader_returns_correct_bytes() {
         .expect("CLOCK.SHP not found in inner MIX");
 
     let bytes = inner.read_by_index(clock_idx).unwrap().unwrap();
-    assert_eq!(bytes.as_slice(), &leaf_data[..], "CLOCK.SHP content mismatch");
+    assert_eq!(
+        bytes.as_slice(),
+        &leaf_data[..],
+        "CLOCK.SHP content mismatch"
+    );
 }

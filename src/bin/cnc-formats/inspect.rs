@@ -4,6 +4,7 @@
 //! `inspect` subcommand — parse a file and print human-readable metadata.
 
 mod extra;
+mod extra2;
 
 use super::{print_format_hint, read_file, resolve_format, Format};
 
@@ -50,19 +51,19 @@ fn inspect_data(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> {
         Format::TmpTs => extra::inspect_ts_tmp(data),
         Format::Voc => extra::inspect_voc(data),
         Format::Pak => extra::inspect_pak(data),
-        Format::ShpD2 => extra::inspect_shp_d2(data),
-        Format::Icn => extra::inspect_icn(data),
-        Format::D2Map => extra::inspect_d2_map(data),
-        Format::BinTd => extra::inspect_bin_td(data),
-        Format::Mpr => extra::inspect_mpr(data),
-        Format::BagIdx => extra::inspect_bag_idx(data),
-        Format::MapRa2 => extra::inspect_map_ra2(data),
-        Format::Wnd => extra::inspect_wnd(data),
-        Format::SageStr => extra::inspect_sage_str(data),
-        Format::MapSage => extra::inspect_map_sage(data),
-        Format::Apt => extra::inspect_apt(data),
-        Format::Dds => extra::inspect_dds(data),
-        Format::Tga => extra::inspect_tga(data),
+        Format::ShpD2 => extra2::inspect_shp_d2(data),
+        Format::Icn => extra2::inspect_icn(data),
+        Format::D2Map => extra2::inspect_d2_map(data),
+        Format::BinTd => extra2::inspect_bin_td(data),
+        Format::Mpr => extra2::inspect_mpr(data),
+        Format::BagIdx => extra2::inspect_bag_idx(data),
+        Format::MapRa2 => extra2::inspect_map_ra2(data),
+        Format::Wnd => extra2::inspect_wnd(data),
+        Format::SageStr => extra2::inspect_sage_str(data),
+        Format::MapSage => extra2::inspect_map_sage(data),
+        Format::Apt => extra2::inspect_apt(data),
+        Format::Dds => extra2::inspect_dds(data),
+        Format::Tga => extra2::inspect_tga(data),
         #[cfg(feature = "miniyaml")]
         Format::Miniyaml => extra::inspect_miniyaml(data),
         #[cfg(feature = "convert")]
@@ -74,7 +75,7 @@ fn inspect_data(data: &[u8], fmt: &Format) -> Result<(), cnc_formats::Error> {
         #[cfg(feature = "xmi")]
         Format::Xmi => extra::inspect_xmi(data),
         #[cfg(feature = "meg")]
-        Format::Meg => extra::inspect_meg(data),
+        Format::Meg => extra2::inspect_meg(data),
     }
 }
 

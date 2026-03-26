@@ -453,4 +453,6 @@ mod tests_decode;
 #[cfg(test)]
 mod tests_playback;
 #[cfg(test)]
+mod tests_playback2;
+#[cfg(test)]
 mod tests_stream;

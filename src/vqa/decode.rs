@@ -364,9 +364,7 @@ impl VqaDecodeState {
         // Hot entries are packed at the front so repeated accesses stay in
         // L1 cache.  Falls back to the original codebook when compaction
         // cannot proceed safely (all-fill frame, tiny codebook, etc.).
-        if let Some((compact_cb, compact_vpt)) =
-            build_compact_codebook(&geo, &self.codebook, vpt)
-        {
+        if let Some((compact_cb, compact_vpt)) = build_compact_codebook(&geo, &self.codebook, vpt) {
             render_frame_pixels(&geo, &compact_cb, &compact_vpt, pixels)
         } else {
             render_frame_pixels(&geo, &self.codebook, vpt, pixels)
@@ -532,7 +530,9 @@ impl VqaFile<'_> {
             let added = match &chunk.fourcc {
                 b"SND0" => append_snd0(&mut all_samples, chunk.data, self.header.bits)?,
                 // SND1: Westwood ADPCM, predictor state carried across chunks.
-                b"SND1" => append_snd1_stateful(&mut all_samples, chunk.data, &mut snd1_cur_sample)?,
+                b"SND1" => {
+                    append_snd1_stateful(&mut all_samples, chunk.data, &mut snd1_cur_sample)?
+                }
                 // SND2: IMA ADPCM, state is maintained across chunks per VQA spec.
                 b"SND2" => append_snd2_stateful(
                     &mut all_samples,
