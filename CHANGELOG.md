@@ -5,6 +5,40 @@ All notable changes to the `cnc-formats` crate and `cncf` CLI will be documented
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.5] - 2026-03-26
+
+### Added
+- **`xor_delta` module**: New public `xor_delta::apply_xor_delta` function implementing the full Format40 XOR-delta command set (small/big skip, small/big XOR from stream, repeated XOR, end-of-stream), extracted from `shp/mod.rs` with complete command-table documentation and `## References` section.
+- **WSA**: Expose `loop_frame` field on `WsaFile` carrying the loop-back XOR-delta data; auto-detect raw XOR vs Format40 command stream by comparing decompressed size.
+- **TMP**: Add `trans_flags` and `remap_data` fields to `TdTmpFile` for per-icon transparency flags and color remap table access.
+- **VQA playback**: Add `read_queued_audio_samples` for bounded-memory audio drain that does not pump additional chunks or buffer future video frames.
+- **LCW**: Add `decompress_into(src, dst, max)` to reuse an existing `Vec` allocation across calls; add `LcwDecoder::with_buffer` constructor with capacity pre-reserve.
+- **AUD**: Add `encode_adpcm_stateful` for encoding that preserves predictor/step-index state across calls, used by the VQA encode path.
+- **VQA playback**: Add `VqaAudioChunkDecoder::PcmDirect` variant to hold already-decoded `Vec<i16>` directly, eliminating the `i16 → bytes → i16` round-trip previously required for decoded-upfront SND1/SND2 chunks.
+- **SHP**: `ShpFrame` gains a `file_offset` field to support `ref_offset`-based keyframe lookup in `XorLcw` decode.
+
+### Fixed
+- **SHP**: `XorLcw` and `XorPrev` delta frames are raw XOR masks, not LCW-compressed streams; `XorLcw` now resolves the reference keyframe by `ref_offset` lookup instead of always using the sequential previous frame.
+- **SHP**: Zero-dimension frames (e.g. `SIDEBAR.SHP`) return empty pixel buffers instead of attempting LCW with a zero output cap.
+- **SHP**: Padding slot validation relaxed — only rejects the slot when `format_byte` carries a valid frame code (`0x20`/`0x40`/`0x80`); non-zero garbage in other fields (as written by original Westwood tools) is accepted.
+- **SHP-D2**: Detect and promote relative-offset table entries (used by RA1 cursor sprites such as `MOUSE.SHP` and `EDMOUSE.SHP`) to absolute offsets; clamp LCW input to the file boundary for last-frame entries whose `data_size` overshoots available bytes.
+- **VQA audio (SND2)**: IMA ADPCM predictor/step-index state is now carried across SND2 chunk boundaries; the previous per-chunk reset to initial state corrupted audio after the first chunk.
+- **VQA audio (SND1)**: Westwood ADPCM `cur_sample` predictor is now carried across SND1 chunk boundaries; the previous per-chunk reset to `0x80` corrupted multi-chunk streams.
+- **CPS**: 6-bit to 8-bit palette conversion uses `(v << 2) | (v >> 4)` so that a full-intensity 63 maps to 255, matching VGA DAC behavior and the `pal` module convention.
+- **`build_aud`**: Include the 4-byte per-chunk frame header in the reported compressed size field.
+- **`perf_alloc` test**: Add a throwaway allocator warmup call before assertions to avoid false positives from glibc per-thread arena initialisation on first real allocation inside the measurement window.
+
+### Performance
+- **IMA ADPCM** (`snd_ima`): Replace per-nibble branch tree with a precomputed `const DELTA_TABLE[89][16]` lookup; `ima_decode_nibble` reduces to a single table load + saturating clamp.
+- **SND2 stereo decode**: Decode left/right nibbles in lockstep (`zip`) to produce correctly interleaved `L0 R0 L1 R1` output, replacing the two-pass split-half approach that required an extra allocation and a separate interleave loop.
+- **VQA codebook** (`build_compact_codebook`): Before each frame, count VPT reference frequencies and pack only referenced entries hottest-first into a ~1–2 KB compact buffer, keeping the working set in L1 cache instead of scattering across a 32–64 KB codebook. Falls back to the full codebook for all-fill frames, malformed input, or fill-marker aliasing.
+- **VQA renderer**: Row-level `copy_from_slice`/`fill` replaces per-pixel inner loops; pre-computed edge clamps eliminate redundant per-pixel bounds checks.
+- **LCW / VQA decode**: `decompress_into` reuses the codebook `Vec` allocation across CBFZ/CBPZ updates; raw CBP path swaps buffers (`mem::swap`) instead of `mem::take` + replace.
+
+### Refactored
+- **File splits (AGENTS.md compliance)**: Seven files exceeding the ~600-line context target were split into focused submodules: `convert/mkv.rs` → `mkv/mod.rs` + `mkv/ebml.rs`; `aud/mod.rs` → `mod.rs` + `encode.rs`; `tmp/mod.rs` → `mod.rs` + `encode.rs`; `sniff.rs` → `sniff/mod.rs` + `sniff/tests.rs`; `bin/.../inspect/extra.rs` → `extra.rs` + `extra2.rs`; `vqa/tests_playback.rs` split; `vqa/playback.rs` → `playback/mod.rs`.
+- **Clippy / rustdoc**: Fixed `empty_line_after_doc_comment`, `needless_pass_by_ref_mut`, `manual_repeat_n`, `dead_code`, `doc_lazy_continuation` warnings; resolved `private_intra_doc_links` and `unresolved_link` rustdoc errors introduced by the file splits.
+
 ## [0.1.0-alpha.4] - 2026-03-23
 
 ### Fixed

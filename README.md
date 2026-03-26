@@ -31,7 +31,7 @@ C&C titles — see the full format list below.
     <img src="https://img.shields.io/github/v/release/iron-curtain-engine/cnc-formats?label=📥%20Download%20Latest%20Release&style=for-the-badge&color=brightgreen" alt="Download Latest Release">
   </a>
   <br>
-  <sub>Pre-built binaries for Windows, macOS, and Linux — or <code>cargo install cnc-formats --version 0.1.0-alpha.4</code> while the crate is prerelease</sub>
+  <sub>Pre-built binaries for Windows, macOS, and Linux — or <code>cargo install cnc-formats --version 0.1.0-alpha.5</code> while the crate is prerelease</sub>
 </p>
 
 ## Status
@@ -66,6 +66,7 @@ C&C titles — see the full format list below.
 | `ini`       | `.ini` | Classic C&C rules file parser                                                   |
 | `mix_crypt` | —      | Blowfish key derivation for encrypted `.mix` (requires `encrypted-mix` feature) |
 | `sniff`     | —      | Content-based format detection (`sniff::sniff_format`)                          |
+| `xor_delta` | —      | Format40 XOR-delta command decoder (used by SHP, WSA, VQA)                      |
 
 ### Feature-gated modules
 
@@ -91,9 +92,10 @@ structure, then optionally run helper conversion or rendering APIs.
 | Error handling | `cnc_formats::Error` re-exported at the crate root |
 | Format detection | `sniff::sniff_format(&[u8]) -> Option<&'static str>` |
 | MIX / BIG archives | `mix::crc`, `mix::builtin_name_map`, `mix::MixArchive::parse`, `get`, `get_by_crc`, `entries`, `file_count`, `mix::MixOverlayIndex`, `big::BigArchive::parse`, `get`, `get_by_index` |
-| Streaming archives / media | `mix::MixArchiveReader::open`, `read`, `copy_by_index`, `open_entry`, `MixEntryReader`, `big::BigArchiveReader::open`, `read`, `copy_by_index`, `vqa::VqaStream::open`, `next_chunk`, `next_chunk_owned`, `vqa::VqaDecoder::open`, `media_info`, `seek_index`, `frame_duration`, `frame_timestamp`, `frame_index_entries`, `next_frame`, `next_frame_into`, `read_audio_samples`, `next_audio_chunk`, `next_audio_for_frame_interval`, `decoded_audio_sample_frames`, `seek_to_frame`, `seek_to_time`, `aud::AudStream::open`, `media_info`, `next_chunk`, `read_samples`, `decoded_sample_frames`, `remaining_sample_frames`, `open_seekable`, `rewind` |
+| Streaming archives / media | `mix::MixArchiveReader::open`, `read`, `copy_by_index`, `open_entry`, `MixEntryReader`, `big::BigArchiveReader::open`, `read`, `copy_by_index`, `vqa::VqaStream::open`, `next_chunk`, `next_chunk_owned`, `vqa::VqaDecoder::open`, `media_info`, `seek_index`, `frame_duration`, `frame_timestamp`, `frame_index_entries`, `next_frame`, `next_frame_into`, `read_audio_samples`, `read_queued_audio_samples`, `next_audio_chunk`, `next_audio_for_frame_interval`, `decoded_audio_sample_frames`, `seek_to_frame`, `seek_to_time`, `aud::AudStream::open`, `media_info`, `next_chunk`, `read_samples`, `decoded_sample_frames`, `remaining_sample_frames`, `open_seekable`, `rewind` |
 | AUD / LUT data | `aud::AudFile::parse`, `aud::decode_adpcm`, `aud::encode_adpcm`, `aud::build_aud`, `lut::LutFile::parse` |
-| LCW codec | `lcw::decompress`, `lcw::compress` |
+| LCW codec | `lcw::decompress`, `lcw::compress`, `lcw::decompress_into`, `lcw::LcwDecoder::with_buffer` |
+| Format40 XOR-delta | `xor_delta::apply_xor_delta` |
 | SHP / WSA / TMP | `shp::ShpFile::parse`, `shp::encode_frames`, `wsa::WsaFile::parse`, `wsa::encode_frames`, `tmp::TdTmpFile::parse`, `tmp::RaTmpFile::parse`, `tmp::TsTmpFile::parse`, `tmp::encode_td_tmp` |
 | CPS / CSF / HVA / SHP-TS / VXL / W3D | `cps::CpsFile::parse`, `csf::CsfFile::parse`, `csf::CsfString`, `hva::HvaFile::parse`, `shp_ts::ShpTsFile::parse`, `vxl::VxlFile::parse`, `w3d::W3dFile::parse` |
 | PAL / FNT / ENG / DIP / INI | `pal::Palette::parse`, `fnt::FntFile::parse`, `eng::EngFile::parse`, `dip::DipFile::parse`, `ini::IniFile::parse` |
