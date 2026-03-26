@@ -35,19 +35,20 @@ fn build_wsa(num_frames: u16, width: u16, height: u16, has_loop: bool) -> Vec<u8
     buf[12..14].copy_from_slice(&0u16.to_le_bytes());
 
     // ── Offset table ──
-    // Offsets are relative to the data area (after header + offset table).
+    // Offsets are absolute file positions (matching original engine convention).
     let offset_table_start = 14;
     for i in 0..=num_frames as usize {
-        let rel_offset = i * frame_payload_size;
+        let abs_offset = header_and_offsets + i * frame_payload_size;
         let pos = offset_table_start + i * 4;
-        buf[pos..pos + 4].copy_from_slice(&(rel_offset as u32).to_le_bytes());
+        buf[pos..pos + 4].copy_from_slice(&(abs_offset as u32).to_le_bytes());
     }
 
     // Loop delta offset.
     let loop_entry_pos = offset_table_start + (num_frames as usize + 1) * 4;
     if has_loop {
-        let loop_rel = (num_frames as usize) * frame_payload_size;
-        buf[loop_entry_pos..loop_entry_pos + 4].copy_from_slice(&(loop_rel as u32).to_le_bytes());
+        let loop_abs = header_and_offsets + (num_frames as usize) * frame_payload_size;
+        buf[loop_entry_pos..loop_entry_pos + 4]
+            .copy_from_slice(&(loop_abs as u32).to_le_bytes());
     } else {
         buf[loop_entry_pos..loop_entry_pos + 4].copy_from_slice(&0u32.to_le_bytes());
     }
@@ -313,9 +314,9 @@ fn build_wsa_lcw(width: u16, height: u16) -> Vec<u8> {
     buf[6..8].copy_from_slice(&width.to_le_bytes());
     buf[8..10].copy_from_slice(&height.to_le_bytes());
 
-    // Offset table (relative to data base = header_and_offsets).
-    let off0 = 0u32;
-    let off1 = lcw_frame0.len() as u32;
+    // Offset table (absolute file positions).
+    let off0 = header_and_offsets as u32;
+    let off1 = off0 + lcw_frame0.len() as u32;
     let off_sentinel = off1 + lcw_frame1.len() as u32;
     let ot = 14;
     buf[ot..ot + 4].copy_from_slice(&off0.to_le_bytes());
@@ -400,13 +401,13 @@ fn parse_loop_frame_present() {
     buf[6..8].copy_from_slice(&width.to_le_bytes());
     buf[8..10].copy_from_slice(&height.to_le_bytes());
 
-    // Offset table (relative to data base = header_and_offsets).
-    // offsets[0] = 0 (frame 0 start)
-    // offsets[1] = len(frame0) (loop delta start, also bounds frame 0)
-    // offsets[2] = len(frame0) + len(loop) (end-of-data sentinel, non-zero → has loop)
+    // Offset table (absolute file positions).
+    // offsets[0] = header_and_offsets (frame 0 start)
+    // offsets[1] = header_and_offsets + len(frame0) (loop delta start)
+    // offsets[2] = header_and_offsets + len(frame0) + len(loop) (sentinel, non-zero → has loop)
     let ot = WSA_HEADER_SIZE;
-    let off0 = 0u32;
-    let off1 = lcw_frame0.len() as u32;
+    let off0 = header_and_offsets as u32;
+    let off1 = off0 + lcw_frame0.len() as u32;
     let off2 = off1 + lcw_loop.len() as u32;
     buf[ot..ot + 4].copy_from_slice(&off0.to_le_bytes());
     buf[ot + 4..ot + 8].copy_from_slice(&off1.to_le_bytes());

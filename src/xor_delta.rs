@@ -37,8 +37,9 @@ use crate::error::Error;
 ///
 /// # Errors
 ///
-/// Returns [`Error::DecompressionError`] if the delta stream references
-/// pixels beyond the bounds of `dest` or if the stream is truncated.
+/// If the delta stream references pixels beyond the bounds of `dest` or
+/// the stream is truncated, decoding stops early (matching the original
+/// engine which has no bounds checking at all).
 pub fn apply_xor_delta(dest: &mut [u8], delta: &[u8]) -> Result<(), Error> {
     let mut di = 0usize; // dest index
     let mut si = 0usize; // delta stream index
@@ -51,9 +52,7 @@ pub fn apply_xor_delta(dest: &mut [u8], delta: &[u8]) -> Result<(), Error> {
             if cmd == 0x80 {
                 // Multi-byte command: read u16le word.
                 if si + 2 > delta.len() {
-                    return Err(Error::DecompressionError {
-                        reason: "Format40: truncated multi-byte command",
-                    });
+                    break; // truncated stream
                 }
                 let word = u16::from_le_bytes([delta[si], delta[si + 1]]) as usize;
                 si += 2;
@@ -67,18 +66,14 @@ pub fn apply_xor_delta(dest: &mut [u8], delta: &[u8]) -> Result<(), Error> {
                         // Big skip: advance dest by `word` pixels.
                         di += word;
                         if di > dest.len() {
-                            return Err(Error::DecompressionError {
-                                reason: "Format40: big skip past end of dest",
-                            });
+                            break; // past end — stop decoding
                         }
                     }
                     2 => {
                         // Big XOR from stream.
                         let count = word & 0x3FFF;
                         if si + count > delta.len() || di + count > dest.len() {
-                            return Err(Error::DecompressionError {
-                                reason: "Format40: big XOR overruns buffer",
-                            });
+                            break; // overruns buffer — stop decoding
                         }
                         for k in 0..count {
                             dest[di + k] ^= delta[si + k];
@@ -90,9 +85,7 @@ pub fn apply_xor_delta(dest: &mut [u8], delta: &[u8]) -> Result<(), Error> {
                         // Big XOR with single value.
                         let count = word & 0x3FFF;
                         if si >= delta.len() || di + count > dest.len() {
-                            return Err(Error::DecompressionError {
-                                reason: "Format40: big XOR value overruns buffer",
-                            });
+                            break; // overruns buffer — stop decoding
                         }
                         let value = delta[si];
                         si += 1;
@@ -106,25 +99,19 @@ pub fn apply_xor_delta(dest: &mut [u8], delta: &[u8]) -> Result<(), Error> {
                 // Small skip: cmd & 0x7F pixels.
                 di += (cmd & 0x7F) as usize;
                 if di > dest.len() {
-                    return Err(Error::DecompressionError {
-                        reason: "Format40: small skip past end of dest",
-                    });
+                    break; // past end — stop decoding
                 }
             }
         } else if cmd == 0 {
             // Repeated XOR: count + value.
             if si + 2 > delta.len() {
-                return Err(Error::DecompressionError {
-                    reason: "Format40: truncated repeated XOR",
-                });
+                break; // truncated stream
             }
             let count = delta[si] as usize;
             let value = delta[si + 1];
             si += 2;
             if di + count > dest.len() {
-                return Err(Error::DecompressionError {
-                    reason: "Format40: repeated XOR overruns dest",
-                });
+                break; // overruns dest — stop decoding
             }
             for k in 0..count {
                 dest[di + k] ^= value;
@@ -134,9 +121,7 @@ pub fn apply_xor_delta(dest: &mut [u8], delta: &[u8]) -> Result<(), Error> {
             // Small XOR from stream: count = cmd.
             let count = cmd as usize;
             if si + count > delta.len() || di + count > dest.len() {
-                return Err(Error::DecompressionError {
-                    reason: "Format40: small XOR overruns buffer",
-                });
+                break; // overruns buffer — stop decoding
             }
             for k in 0..count {
                 dest[di + k] ^= delta[si + k];
@@ -190,30 +175,30 @@ mod tests {
     }
 
     #[test]
-    fn overrun_returns_error() {
+    fn overrun_stops_decoding() {
         let mut dest = [0u8; 2];
-        // cmd=4: wants 4 bytes but dest is only 2
+        // cmd=4: wants 4 bytes but dest is only 2 — stops early, no error
         let delta = [0x04, 0x11, 0x22, 0x33, 0x44];
-        let result = apply_xor_delta(&mut dest, &delta);
-        assert!(result.is_err());
+        apply_xor_delta(&mut dest, &delta).unwrap();
+        assert_eq!(dest, [0u8; 2]); // unchanged — decoding stopped before writing
     }
 
     #[test]
-    fn big_skip_overrun_returns_error() {
+    fn big_skip_overrun_stops() {
         let mut dest = [0u8; 4];
-        // 0x80 + u16le(0x7FFF) = big skip of 32767 pixels — way past dest
+        // 0x80 + u16le(0x7FFF) = big skip of 32767 pixels — stops early
         let delta = [0x80, 0xFF, 0x7F];
-        let result = apply_xor_delta(&mut dest, &delta);
-        assert!(result.is_err());
+        apply_xor_delta(&mut dest, &delta).unwrap();
+        assert_eq!(dest, [0u8; 4]); // unchanged
     }
 
     #[test]
-    fn small_skip_overrun_returns_error() {
+    fn small_skip_overrun_stops() {
         let mut dest = [0u8; 4];
-        // 0xFF = small skip of 127 pixels — past dest
+        // 0xFF = small skip of 127 pixels — stops early
         let delta = [0xFF];
-        let result = apply_xor_delta(&mut dest, &delta);
-        assert!(result.is_err());
+        apply_xor_delta(&mut dest, &delta).unwrap();
+        assert_eq!(dest, [0u8; 4]); // unchanged
     }
 
     #[test]
@@ -259,13 +244,13 @@ mod tests {
         let _ = apply_xor_delta(&mut dest, &delta);
     }
 
-    /// Truncated multi-byte command (0x80 without following u16).
+    /// Truncated multi-byte command (0x80 without following u16) stops early.
     #[test]
     fn truncated_multi_byte_command() {
         let mut dest = [0u8; 4];
         let delta = [0x80, 0x01]; // only 1 byte after 0x80, need 2
-        let result = apply_xor_delta(&mut dest, &delta);
-        assert!(result.is_err());
+        apply_xor_delta(&mut dest, &delta).unwrap();
+        assert_eq!(dest, [0u8; 4]); // unchanged — decoding stopped
     }
 
     /// Empty delta stream is a no-op.

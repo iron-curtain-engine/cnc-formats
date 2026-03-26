@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! [WsaHeader]               14 bytes
-//! [frame offsets]            (num_frames + 2) × u32   (relative to data start)
+//! [frame offsets]            (num_frames + 2) × u32   (absolute file positions)
 //! [compressed frame data]    back-to-back LCW segments
 //! ```
 //!
@@ -239,7 +239,12 @@ impl<'a> WsaFile<'a> {
         } else {
             None
         };
-        let data_base = palette_end;
+        // Offsets in original WSA files are absolute file positions (from
+        // byte 0), but they were calculated *before* the palette was inserted
+        // into the file.  Adding `palette_size` corrects for the palette that
+        // sits between the offset table and the frame data.  For files without
+        // an embedded palette, `palette_size` is 0 and offsets map directly.
+        let data_base = palette_size;
 
         // ── Frames ───────────────────────────────────────────────────────
         let fc = num_frames as usize;
@@ -453,8 +458,9 @@ pub fn encode_frames(frames: &[&[u8]], width: u16, height: u16) -> Result<Vec<u8
     out.extend_from_slice(&0u16.to_le_bytes()); // flags (no palette)
 
     // ── Offset table ((num_frames + 2) × u32) ───────────────────────
-    // Offsets are relative to data_base.
-    let mut data_offset = 0u32;
+    // Offsets are absolute file positions (matching the original engine
+    // convention).  The first frame starts right after header + offsets.
+    let mut data_offset = data_base as u32;
     for c in &compressed_frames {
         out.extend_from_slice(&data_offset.to_le_bytes());
         data_offset = data_offset.saturating_add(c.len() as u32);
