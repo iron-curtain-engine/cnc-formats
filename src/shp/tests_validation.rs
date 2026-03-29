@@ -21,6 +21,29 @@ fn parse_sentinel_nonzero_ref_fields_accepted() {
 }
 
 #[test]
+fn parse_sentinel_nonzero_format_byte_accepted() {
+    // RA1 files like MOUSE.SHP and EDMOUSE.SHP have a non-zero format_byte
+    // in the EOF sentinel that is not a valid frame code (0x20/0x40/0x80).
+    // The parser must accept benign garbage values here.
+    let mut bytes = build_shp(2, 2, 0, &[&[0xFE, 0x04, 0x00, 0xAB, 0x80]], None);
+    let sentinel_start = 14 + OFFSET_ENTRY_SIZE;
+    // byte 3 of the entry u32 is the format_byte (bits 24-31 of the LE u32).
+    bytes[sentinel_start + 3] = 0x01; // non-zero but not a valid frame code
+    assert!(ShpFile::parse(&bytes).is_ok());
+}
+
+#[test]
+fn parse_sentinel_with_frame_code_rejected() {
+    // If the sentinel's format_byte matches a valid frame code, we probably
+    // miscounted frames — reject the file.
+    let mut bytes = build_shp(2, 2, 0, &[&[0xFE, 0x04, 0x00, 0xAB, 0x80]], None);
+    let sentinel_start = 14 + OFFSET_ENTRY_SIZE;
+    bytes[sentinel_start + 3] = 0x80; // Lcw frame code
+    let result = ShpFile::parse(&bytes);
+    assert!(matches!(result, Err(Error::InvalidMagic { .. })));
+}
+
+#[test]
 fn parse_padding_nonzero_ref_fields_accepted() {
     // Same real-world scenario for the zero-padding entry that follows the
     // EOF sentinel.

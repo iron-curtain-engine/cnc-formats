@@ -373,13 +373,20 @@ impl<'input> ShpFile<'input> {
             offset: frame_count,
             bound: entries.len(),
         })?;
-        // Only format_byte identifies the sentinel as a non-frame entry
-        // (valid frame codes are 0x20 / 0x40 / 0x80).  ref_offset and
-        // ref_format carry no meaning here and original Westwood tools
-        // wrote non-zero garbage into those positions on some RA1 assets.
-        if eof_entry.format_byte != 0 {
+        // The sentinel's ref_offset and ref_format carry no meaning, and
+        // original Westwood tools wrote non-zero garbage into any field
+        // of this slot on some RA1 assets (e.g. MOUSE.SHP, EDMOUSE.SHP).
+        // Only reject if format_byte is a valid frame code (0x20/0x40/
+        // 0x80), which would genuinely indicate a mis-parsed header
+        // (we miscounted frames and the sentinel is actually a real
+        // frame).  Any other non-zero value is benign garbage.
+        let eof_fmt = eof_entry.format_byte;
+        if eof_fmt == ShpFrameFormat::Lcw as u8
+            || eof_fmt == ShpFrameFormat::XorLcw as u8
+            || eof_fmt == ShpFrameFormat::XorPrev as u8
+        {
             return Err(Error::InvalidMagic {
-                context: "SHP EOF sentinel",
+                context: "SHP EOF sentinel has frame format code",
             });
         }
         let eof_offset = eof_entry.file_offset as usize;
