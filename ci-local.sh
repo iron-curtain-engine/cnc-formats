@@ -172,7 +172,7 @@ echo
 run_check "Format check" "cargo fmt --check"
 
 # -- 2. Clippy (all features) ----------------------------------------------
-run_check "Clippy (all features)" "cargo clippy --tests --all-features -- -D warnings"
+run_check "Clippy (all features)" "cargo clippy --all-targets --all-features -- -D warnings"
 
 # -- 3. Compile check (no default features) --------------------------------
 # Catches missing #[cfg(feature)] gates. Full clippy is redundant here since
@@ -270,7 +270,7 @@ if command -v rustup &> /dev/null; then
 
         export CARGO_TARGET_DIR=target/msrv
         run_check "MSRV compile (Rust $MSRV)" "rustup run $MSRV cargo check --all-targets --all-features"
-        run_check "MSRV clippy (Rust $MSRV)" "rustup run $MSRV cargo clippy --tests --all-features -- -D warnings"
+        run_check "MSRV clippy (Rust $MSRV)" "rustup run $MSRV cargo clippy --all-targets --all-features -- -D warnings"
         run_check "MSRV test (Rust $MSRV)" "rustup run $MSRV cargo test --all-features"
         unset CARGO_TARGET_DIR
     fi

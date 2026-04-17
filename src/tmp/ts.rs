@@ -294,8 +294,8 @@ impl<'input> TsTmpFile<'input> {
                 None
             };
 
-            let col = if cols > 0 { (i % cols) as u32 } else { 0 };
-            let row = if cols > 0 { (i / cols) as u32 } else { 0 };
+            let col = (i as u32).checked_rem(cols as u32).unwrap_or(0);
+            let row = (i as u32).checked_div(cols as u32).unwrap_or(0);
 
             tiles.push(Some(TsTmpTile {
                 col,

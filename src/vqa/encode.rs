@@ -426,11 +426,7 @@ fn build_vpt(pixels: &[u8], codebook: &[u8], width: usize, geo: &BlockGeometry) 
     // VPT is 2 × total_blocks: first half = lo, second half = hi.
     let mut vpt = vec![0u8; geo.total_blocks.saturating_mul(2)];
 
-    let num_entries = if geo.block_size > 0 {
-        codebook.len() / geo.block_size
-    } else {
-        0
-    };
+    let num_entries = codebook.len().checked_div(geo.block_size).unwrap_or(0);
 
     for by in 0..geo.blocks_y {
         for bx in 0..geo.blocks_x {

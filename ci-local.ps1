@@ -352,7 +352,7 @@ Write-Host ""
 Run-Check "Format check" "cargo fmt --check"
 
 # -- 2. Clippy (all features) ----------------------------------------------
-Run-Check "Clippy (all features)" "cargo clippy --tests --all-features -- -D warnings"
+Run-Check "Clippy (all features)" "cargo clippy --all-targets --all-features -- -D warnings"
 
 # -- 3. Compile check (no default features) --------------------------------
 # Catches missing #[cfg(feature)] gates. Full clippy is redundant here since
@@ -523,7 +523,7 @@ if ($script:RustupExe) {
 
         $env:CARGO_TARGET_DIR = "target/msrv"
         Run-Check "MSRV compile (Rust $msrv)" "rustup run $msrv cargo check --all-targets --all-features"
-        Run-Check "MSRV clippy (Rust $msrv)" "rustup run $msrv cargo clippy --tests --all-features -- -D warnings"
+        Run-Check "MSRV clippy (Rust $msrv)" "rustup run $msrv cargo clippy --all-targets --all-features -- -D warnings"
         Run-Check "MSRV test (Rust $msrv)" "rustup run $msrv cargo test --all-features"
         $env:CARGO_TARGET_DIR = $null
     }

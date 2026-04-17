@@ -81,7 +81,7 @@ pub(crate) fn build_compact_codebook(
     }
 
     // Sort descending by frequency.
-    ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    ranked.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
 
     // ── Safety: compact indices must not alias the fill_marker hi-byte ─────
     // After remapping, block index = compact rank; the hi byte of that rank

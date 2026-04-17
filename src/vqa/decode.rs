@@ -122,8 +122,8 @@ impl VqaDecodeState {
         let block_size = block_w.saturating_mul(block_h);
         let width = header.width as usize;
         let height = header.height as usize;
-        let blocks_x = if block_w > 0 { width / block_w } else { 0 };
-        let blocks_y = if block_h > 0 { height / block_h } else { 0 };
+        let blocks_x = width.checked_div(block_w).unwrap_or(0);
+        let blocks_y = height.checked_div(block_h).unwrap_or(0);
 
         // Determine fill marker: 0xFF for hi-res (block_h == 4), 0x0F otherwise.
         // Per VQA_INFO.TXT: "If BlockW=2 -> 0x0f is used, if BlockH=4 -> 0xff is used"

@@ -112,7 +112,7 @@ pub fn encode_avi<T: AsRef<[u8]>>(
     // ── 'avih' (main AVI header, 56 bytes) ───────────────────────────
     out.extend_from_slice(b"avih");
     write_u32_le(&mut out, 56); // chunk size
-    let us_per_frame = if fps > 0 { 1_000_000 / fps } else { 66667 };
+    let us_per_frame = 1_000_000u32.checked_div(fps).unwrap_or(66667);
     write_u32_le(&mut out, us_per_frame); // dwMicroSecPerFrame
     write_u32_le(&mut out, 0); // dwMaxBytesPerSec
     write_u32_le(&mut out, 0); // dwPaddingGranularity

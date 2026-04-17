@@ -274,34 +274,32 @@ fn parse_hdrl(data: &[u8]) -> HdrlParams {
                         u32::from_le_bytes(buf)
                     })
                     .unwrap_or(66667);
-                if us_per_frame > 0 {
-                    p.fps = 1_000_000 / us_per_frame;
+                if let Some(fps) = 1_000_000u32.checked_div(us_per_frame) {
+                    p.fps = fps;
                 }
             }
-            b"strh" => {
-                if in_video_strl {
-                    // dwScale at offset 20, dwRate at offset 24.
-                    let scale_off = payload_start.saturating_add(20);
-                    let rate_off = payload_start.saturating_add(24);
-                    let scale = data
-                        .get(scale_off..scale_off.saturating_add(4))
-                        .map(|s| {
-                            let mut buf = [0u8; 4];
-                            buf.copy_from_slice(s);
-                            u32::from_le_bytes(buf)
-                        })
-                        .unwrap_or(1);
-                    let rate = data
-                        .get(rate_off..rate_off.saturating_add(4))
-                        .map(|s| {
-                            let mut buf = [0u8; 4];
-                            buf.copy_from_slice(s);
-                            u32::from_le_bytes(buf)
-                        })
-                        .unwrap_or(15);
-                    if scale > 0 {
-                        p.fps = rate / scale;
-                    }
+            b"strh" if in_video_strl => {
+                // dwScale at offset 20, dwRate at offset 24.
+                let scale_off = payload_start.saturating_add(20);
+                let rate_off = payload_start.saturating_add(24);
+                let scale = data
+                    .get(scale_off..scale_off.saturating_add(4))
+                    .map(|s| {
+                        let mut buf = [0u8; 4];
+                        buf.copy_from_slice(s);
+                        u32::from_le_bytes(buf)
+                    })
+                    .unwrap_or(1);
+                let rate = data
+                    .get(rate_off..rate_off.saturating_add(4))
+                    .map(|s| {
+                        let mut buf = [0u8; 4];
+                        buf.copy_from_slice(s);
+                        u32::from_le_bytes(buf)
+                    })
+                    .unwrap_or(15);
+                if let Some(fps) = rate.checked_div(scale) {
+                    p.fps = fps;
                 }
             }
             b"strf" => {
@@ -378,11 +376,9 @@ fn parse_movi(
 
         match fourcc {
             // Video: "00dc" or "00db" (compressed/uncompressed DIB).
-            b"00dc" | b"00db" => {
-                if width > 0 && height > 0 {
-                    let rgba = bgr_to_rgba(payload, width, height, bit_count)?;
-                    frames.push(rgba);
-                }
+            b"00dc" | b"00db" if width > 0 && height > 0 => {
+                let rgba = bgr_to_rgba(payload, width, height, bit_count)?;
+                frames.push(rgba);
             }
             // Audio: "01wb".
             b"01wb" => {
