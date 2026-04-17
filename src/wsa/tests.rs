@@ -47,8 +47,7 @@ fn build_wsa(num_frames: u16, width: u16, height: u16, has_loop: bool) -> Vec<u8
     let loop_entry_pos = offset_table_start + (num_frames as usize + 1) * 4;
     if has_loop {
         let loop_abs = header_and_offsets + (num_frames as usize) * frame_payload_size;
-        buf[loop_entry_pos..loop_entry_pos + 4]
-            .copy_from_slice(&(loop_abs as u32).to_le_bytes());
+        buf[loop_entry_pos..loop_entry_pos + 4].copy_from_slice(&(loop_abs as u32).to_le_bytes());
     } else {
         buf[loop_entry_pos..loop_entry_pos + 4].copy_from_slice(&0u32.to_le_bytes());
     }

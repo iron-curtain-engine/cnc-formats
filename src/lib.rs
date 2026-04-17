@@ -15,6 +15,7 @@
 //! | [`big`]         | `.big`         | EA BIG archive with stored filenames     |
 //! | [`dip`]         | `.dip`         | Westwood setup/installer data            |
 //! | [`eng`]         | `.eng`         | Westwood language string tables          |
+//! | [`iso9660`]     | `.iso`         | ISO 9660 CD-ROM filesystem image         |
 //! | [`lcw`]         | —              | LCW decompression used by SHP/VQA/WSA    |
 //! | [`lut`]         | `.lut`         | Red Alert Chrono Vortex lookup tables    |
 //! | [`tmp`]         | `.tmp`         | Terrain tile sets (TD + RA + TS/RA2 iso) |
@@ -111,6 +112,8 @@ pub mod hva;
 /// Dune II icon/tile graphics (`.icn` + `ICON.MAP`).
 pub mod icn;
 pub mod ini;
+/// ISO 9660 / ECMA-119 CD-ROM filesystem image parser (`.iso`).
+pub mod iso9660;
 pub mod lcw;
 pub mod lut;
 /// Red Alert 2 / Yuri's Revenge map file parser (`.map`).

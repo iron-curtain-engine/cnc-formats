@@ -230,7 +230,7 @@ pub(crate) fn decrypt_mix_header(
     encrypted_data: &[u8],
     key: &[u8; BLOWFISH_KEY_LEN],
 ) -> Result<Vec<u8>, Error> {
-    use blowfish::cipher::BlockDecrypt;
+    use blowfish::cipher::BlockCipherDecrypt;
     use blowfish::cipher::KeyInit;
     // Standard (big-endian) Blowfish — the default generic parameter is BE.
     type BlowfishBE = blowfish::Blowfish;
@@ -260,9 +260,7 @@ pub(crate) fn decrypt_mix_header(
     first_block.copy_from_slice(first_slice);
     // Standard Blowfish byte-swaps the u32 halves internally, matching
     // Westwood's swap-before-rounds convention.
-    cipher.decrypt_block(
-        blowfish::cipher::generic_array::GenericArray::from_mut_slice(&mut first_block),
-    );
+    cipher.decrypt_block((&mut first_block).into());
 
     // Read count (u16) from the decrypted first block.
     let count = read_u16_le(&first_block, 0)? as usize;
@@ -305,9 +303,7 @@ pub(crate) fn decrypt_mix_header(
                 available: encrypted_data.len(),
             })?;
         block.copy_from_slice(src_slice);
-        cipher.decrypt_block(
-            blowfish::cipher::generic_array::GenericArray::from_mut_slice(&mut block),
-        );
+        cipher.decrypt_block((&mut block).into());
         let dec_len = decrypted.len();
         let dst = decrypted
             .get_mut(src_off..src_off + 8)
