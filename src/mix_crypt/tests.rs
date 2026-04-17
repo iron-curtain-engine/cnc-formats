@@ -231,8 +231,7 @@ fn decrypt_header_short_input_returns_eof() {
 /// BlowfishLE, then decrypted and compared to the original.
 #[test]
 fn decrypt_header_roundtrip() {
-    use blowfish::cipher::generic_array::GenericArray;
-    use blowfish::cipher::{BlockEncrypt, KeyInit};
+    use blowfish::cipher::{Block, BlockCipherEncrypt, KeyInit};
     type BlowfishBE = blowfish::Blowfish;
 
     // Build plaintext: FileHeader (6 bytes) + 1 SubBlock (12 bytes) = 18.
@@ -253,7 +252,9 @@ fn decrypt_header_roundtrip() {
     let cipher = BlowfishBE::new_from_slice(&key).unwrap();
     let mut encrypted = plaintext.clone();
     for chunk in encrypted.chunks_exact_mut(8) {
-        cipher.encrypt_block(GenericArray::from_mut_slice(chunk));
+        let mut blk = Block::<BlowfishBE>::try_from(&chunk[..]).unwrap();
+        cipher.encrypt_blocks(std::slice::from_mut(&mut blk));
+        chunk.copy_from_slice(&blk);
     }
 
     // Decrypt and verify.
@@ -271,8 +272,7 @@ fn decrypt_header_roundtrip() {
 /// encrypted data triggers UnexpectedEof when reading the SubBlock index.
 #[test]
 fn decrypt_header_large_count_eof() {
-    use blowfish::cipher::generic_array::GenericArray;
-    use blowfish::cipher::{BlockEncrypt, KeyInit};
+    use blowfish::cipher::{Block, BlockCipherEncrypt, KeyInit};
     type BlowfishBE = blowfish::Blowfish;
 
     let mut block = [0u8; 8];
@@ -280,7 +280,9 @@ fn decrypt_header_large_count_eof() {
 
     let key = [0xABu8; BLOWFISH_KEY_LEN];
     let cipher = BlowfishBE::new_from_slice(&key).unwrap();
-    cipher.encrypt_block(GenericArray::from_mut_slice(&mut block));
+    let mut blk = Block::<BlowfishBE>::try_from(block.as_slice()).unwrap();
+    cipher.encrypt_blocks(std::slice::from_mut(&mut blk));
+    block.copy_from_slice(&blk);
 
     let err = decrypt_mix_header(&block, &key).unwrap_err();
     assert!(
@@ -298,8 +300,7 @@ fn decrypt_header_large_count_eof() {
 /// provide only 1 block (8 bytes).
 #[test]
 fn decrypt_header_truncated_after_first_block() {
-    use blowfish::cipher::generic_array::GenericArray;
-    use blowfish::cipher::{BlockEncrypt, KeyInit};
+    use blowfish::cipher::{Block, BlockCipherEncrypt, KeyInit};
     type BlowfishBE = blowfish::Blowfish;
 
     let mut block = [0u8; 8];
@@ -307,7 +308,9 @@ fn decrypt_header_truncated_after_first_block() {
 
     let key = [0xCDu8; BLOWFISH_KEY_LEN];
     let cipher = BlowfishBE::new_from_slice(&key).unwrap();
-    cipher.encrypt_block(GenericArray::from_mut_slice(&mut block));
+    let mut blk = Block::<BlowfishBE>::try_from(block.as_slice()).unwrap();
+    cipher.encrypt_blocks(std::slice::from_mut(&mut blk));
+    block.copy_from_slice(&blk);
 
     let err = decrypt_mix_header(&block, &key).unwrap_err();
     assert!(
@@ -328,8 +331,7 @@ fn decrypt_header_truncated_after_first_block() {
 /// unreliable.
 #[test]
 fn decrypt_header_deterministic() {
-    use blowfish::cipher::generic_array::GenericArray;
-    use blowfish::cipher::{BlockEncrypt, KeyInit};
+    use blowfish::cipher::{Block, BlockCipherEncrypt, KeyInit};
     type BlowfishBE = blowfish::Blowfish;
 
     let mut block = [0u8; 8];
@@ -337,7 +339,9 @@ fn decrypt_header_deterministic() {
 
     let key = [0x55u8; BLOWFISH_KEY_LEN];
     let cipher = BlowfishBE::new_from_slice(&key).unwrap();
-    cipher.encrypt_block(GenericArray::from_mut_slice(&mut block));
+    let mut blk = Block::<BlowfishBE>::try_from(block.as_slice()).unwrap();
+    cipher.encrypt_blocks(std::slice::from_mut(&mut blk));
+    block.copy_from_slice(&blk);
 
     let a = decrypt_mix_header(&block, &key).unwrap();
     let b = decrypt_mix_header(&block, &key).unwrap();

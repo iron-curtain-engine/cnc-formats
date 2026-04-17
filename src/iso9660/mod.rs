@@ -20,8 +20,8 @@
 //!
 //! Two APIs are provided:
 //!
-//! - [`Iso9660Archive`] — in-memory parser that borrows a `&[u8]` slice.
-//! - [`Iso9660ArchiveReader`] — streaming reader backed by any `Read + Seek`.
+//! - [`Iso9660Archive`](crate::iso9660::Iso9660Archive) — in-memory parser that borrows a `&[u8]` slice.
+//! - [`Iso9660ArchiveReader`](crate::iso9660::Iso9660ArchiveReader) — streaming reader backed by any `Read + Seek`.
 //!
 //! ## File Layout
 //!

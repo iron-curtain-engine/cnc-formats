@@ -20,8 +20,7 @@ fn parse_extended_encrypted_with_sha1_returns_error() {
 #[cfg(feature = "encrypted-mix")]
 #[test]
 fn parse_encrypted_mix_end_to_end() {
-    use blowfish::cipher::generic_array::GenericArray;
-    use blowfish::cipher::{BlockEncrypt, KeyInit};
+    use blowfish::cipher::{Block, BlockCipherEncrypt, KeyInit};
     type BlowfishBE = blowfish::Blowfish;
 
     let key_source = [0u8; 80];
@@ -42,7 +41,9 @@ fn parse_encrypted_mix_end_to_end() {
     let cipher = BlowfishBE::new_from_slice(&bf_key).unwrap();
     let mut encrypted_header = plaintext.clone();
     for chunk in encrypted_header.chunks_exact_mut(8) {
-        cipher.encrypt_block(GenericArray::from_mut_slice(chunk));
+        let mut blk = Block::<BlowfishBE>::try_from(&chunk[..]).unwrap();
+        cipher.encrypt_blocks(std::slice::from_mut(&mut blk));
+        chunk.copy_from_slice(&blk);
     }
 
     let mut archive_bytes = Vec::new();

@@ -69,14 +69,15 @@ fn decrypt_real_redalert_mix_header() {
 
     let bf_key = derive_blowfish_key(&key_source).unwrap();
 
-    use blowfish::cipher::generic_array::GenericArray;
-    use blowfish::cipher::{BlockDecrypt, KeyInit};
+    use blowfish::cipher::{Block, BlockCipherDecrypt, KeyInit};
     type BlowfishBE = blowfish::Blowfish;
 
     let cipher = BlowfishBE::new_from_slice(&bf_key).unwrap();
     let mut block = [0u8; 8];
     block.copy_from_slice(&encrypted_start[..8]);
-    cipher.decrypt_block(GenericArray::from_mut_slice(&mut block));
+    let mut blk = Block::<BlowfishBE>::try_from(block.as_slice()).unwrap();
+    cipher.decrypt_blocks(std::slice::from_mut(&mut blk));
+    block.copy_from_slice(&blk);
 
     let count = u16::from_le_bytes([block[0], block[1]]);
     let data_size = u32::from_le_bytes([block[2], block[3], block[4], block[5]]);
